@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -11,6 +11,12 @@
 # define OSSL_TEST_SSLTESTLIB_H
 
 # include <openssl/ssl.h>
+
+#define TLS13_AES_128_GCM_SHA256_BYTES  ((const unsigned char *)"\x13\x01")
+#define TLS13_AES_256_GCM_SHA384_BYTES  ((const unsigned char *)"\x13\x02")
+#define TLS13_CHACHA20_POLY1305_SHA256_BYTES ((const unsigned char *)"\x13\x03")
+#define TLS13_AES_128_CCM_SHA256_BYTES ((const unsigned char *)"\x13\x04")
+#define TLS13_AES_128_CCM_8_SHA256_BYTES ((const unsigned char *)"\x13\05")
 
 int create_ssl_ctx_pair(OSSL_LIB_CTX *libctx, const SSL_METHOD *sm,
                         const SSL_METHOD *cm, int min_proto_version,
@@ -38,6 +44,15 @@ const BIO_METHOD *bio_s_always_retry(void);
 void bio_s_always_retry_free(void);
 void set_always_retry_err_val(int err);
 
+/*
+ * Maybe retry BIO ctrls. We make them large enough to not clash with standard
+ * BIO ctrl codes.
+ */
+#define MAYBE_RETRY_CTRL_SET_RETRY_AFTER_CNT       (1 << 15)
+
+const BIO_METHOD *bio_s_maybe_retry(void);
+void bio_s_maybe_retry_free(void);
+
 /* Packet types - value 0 is reserved */
 #define INJECT_PACKET                   1
 #define INJECT_PACKET_IGNORE_REC_SEQ    2
@@ -59,5 +74,11 @@ int mempacket_test_inject(BIO *bio, const char *in, int inl, int pktnum,
 typedef struct mempacket_st MEMPACKET;
 
 DEFINE_STACK_OF(MEMPACKET)
+
+SSL_SESSION *create_a_psk(SSL *ssl, size_t mdsize);
+
+/* Add cert from `cert_file` multiple times to create large extra cert chain */
+int ssl_ctx_add_large_cert_chain(OSSL_LIB_CTX *libctx, SSL_CTX *sctx,
+                                 const char *cert_file);
 
 #endif /* OSSL_TEST_SSLTESTLIB_H */

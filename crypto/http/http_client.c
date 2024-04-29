@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2001-2024 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright Siemens AG 2018-2020
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
@@ -67,6 +67,7 @@ struct ossl_http_req_ctx_st {
     time_t max_time;            /* Maximum end time of current transfer, or 0 */
     time_t max_total_time;      /* Maximum end time of total transfer, or 0 */
     char *redirection_url;      /* Location obtained from HTTP status 301/302 */
+    size_t max_hdr_lines;       /* Max. number of http hdr lines, or 0 */
 };
 
 /* HTTP states */
@@ -106,6 +107,7 @@ OSSL_HTTP_REQ_CTX *OSSL_HTTP_REQ_CTX_new(BIO *wbio, BIO *rbio, int buf_size)
     rctx->buf = OPENSSL_malloc(rctx->buf_size);
     rctx->wbio = wbio;
     rctx->rbio = rbio;
+    rctx->max_hdr_lines = OSSL_HTTP_DEFAULT_MAX_RESP_HDR_LINES;
     if (rctx->buf == NULL) {
         OPENSSL_free(rctx);
         return NULL;
@@ -167,7 +169,8 @@ void OSSL_HTTP_REQ_CTX_set_max_response_length(OSSL_HTTP_REQ_CTX *rctx,
 
 /*
  * Create request line using |rctx| and |path| (or "/" in case |path| is NULL).
- * Server name (and port) must be given if and only if plain HTTP proxy is used.
+ * Server name (and optional port) must be given if and only if
+ * a plain HTTP proxy is used and |path| does not begin with 'http://'.
  */
 int OSSL_HTTP_REQ_CTX_set_request_line(OSSL_HTTP_REQ_CTX *rctx, int method_POST,
                                        const char *server, const char *port,
@@ -196,11 +199,17 @@ int OSSL_HTTP_REQ_CTX_set_request_line(OSSL_HTTP_REQ_CTX *rctx, int method_POST,
             return 0;
     }
 
-    /* Make sure path includes a forward slash */
-    if (path == NULL)
+    /* Make sure path includes a forward slash (abs_path) */
+    if (path == NULL)  {
         path = "/";
-    if (path[0] != '/' && BIO_printf(rctx->mem, "/") <= 0)
+    } else if (HAS_PREFIX(path, "http://")) { /* absoluteURI for proxy use */
+        if (server != NULL) {
+            ERR_raise(ERR_LIB_HTTP, ERR_R_PASSED_INVALID_ARGUMENT);
+            return 0;
+        }
+    } else if (path[0] != '/' && BIO_printf(rctx->mem, "/") <= 0) {
         return 0;
+    }
     /*
      * Add (the rest of) the path and the HTTP version,
      * which is fixed to 1.0 for straightforward implementation of keep-alive
@@ -348,6 +357,16 @@ int OSSL_HTTP_REQ_CTX_set1_req(OSSL_HTTP_REQ_CTX *rctx, const char *content_type
     return res;
 }
 
+void OSSL_HTTP_REQ_CTX_set_max_response_hdr_lines(OSSL_HTTP_REQ_CTX *rctx,
+                                                  size_t count)
+{
+    if (rctx == NULL) {
+        ERR_raise(ERR_LIB_HTTP, ERR_R_PASSED_NULL_PARAMETER);
+        return;
+    }
+    rctx->max_hdr_lines = count;
+}
+
 static int add1_headers(OSSL_HTTP_REQ_CTX *rctx,
                         const STACK_OF(CONF_VALUE) *headers, const char *host)
 {
@@ -488,13 +507,17 @@ static int parse_http_line1(char *line, int *found_keep_alive)
 
 static int check_set_resp_len(OSSL_HTTP_REQ_CTX *rctx, size_t len)
 {
-    if (rctx->max_resp_len != 0 && len > rctx->max_resp_len)
+    if (rctx->max_resp_len != 0 && len > rctx->max_resp_len) {
         ERR_raise_data(ERR_LIB_HTTP, HTTP_R_MAX_RESP_LEN_EXCEEDED,
                        "length=%zu, max=%zu", len, rctx->max_resp_len);
-    if (rctx->resp_len != 0 && rctx->resp_len != len)
+        return 0;
+    }
+    if (rctx->resp_len != 0 && rctx->resp_len != len) {
         ERR_raise_data(ERR_LIB_HTTP, HTTP_R_INCONSISTENT_CONTENT_LENGTH,
                        "ASN.1 length=%zu, Content-Length=%zu",
                        len, rctx->resp_len);
+        return 0;
+    }
     rctx->resp_len = len;
     return 1;
 }
@@ -526,6 +549,7 @@ int OSSL_HTTP_REQ_CTX_nbio(OSSL_HTTP_REQ_CTX *rctx)
     size_t resp_len;
     const unsigned char *p;
     char *buf, *key, *value, *line_end = NULL;
+    size_t resp_hdr_lines = 0;
 
     if (rctx == NULL) {
         ERR_raise(ERR_LIB_HTTP, ERR_R_PASSED_NULL_PARAMETER);
@@ -671,6 +695,14 @@ int OSSL_HTTP_REQ_CTX_nbio(OSSL_HTTP_REQ_CTX *rctx)
             return 0;
         }
 
+        resp_hdr_lines++;
+        if (rctx->max_hdr_lines != 0 && rctx->max_hdr_lines < resp_hdr_lines) {
+            ERR_raise(ERR_LIB_HTTP, HTTP_R_RESPONSE_TOO_MANY_HDRLINES);
+            OSSL_TRACE(HTTP, "Received too many headers\n");
+            rctx->state = OHS_ERROR;
+            return 0;
+        }
+
         /* Don't allow excessive lines */
         if (n == rctx->buf_size) {
             ERR_raise(ERR_LIB_HTTP, HTTP_R_RESPONSE_LINE_TOO_LONG);
@@ -774,6 +806,8 @@ int OSSL_HTTP_REQ_CTX_nbio(OSSL_HTTP_REQ_CTX *rctx)
             goto next_line;
         if (OSSL_TRACE_ENABLED(HTTP))
             OSSL_TRACE(HTTP, "]\n");
+
+        resp_hdr_lines = 0;
 
         if (rctx->keep_alive != 0 /* do not let server initiate keep_alive */
                 && !found_keep_alive /* otherwise there is no change */) {
@@ -1466,7 +1500,7 @@ int OSSL_HTTP_proxy_connect(BIO *bio, const char *server, const char *port,
     do {
         /*
          * This does not necessarily catch the case when the full
-         * HTTP response came in in more than a single TCP message.
+         * HTTP response came in more than a single TCP message.
          */
         read_len = BIO_gets(fbio, mbuf, BUF_SIZE);
     } while (read_len > 2);

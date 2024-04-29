@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -385,7 +385,10 @@ static int aes_ocb_set_ctx_params(void *vctx, const OSSL_PARAM params[])
         /* IV len must be 1 to 15 */
         if (sz < OCB_MIN_IV_LEN || sz > OCB_MAX_IV_LEN)
             return 0;
-        ctx->base.ivlen = sz;
+        if (ctx->base.ivlen != sz) {
+            ctx->base.ivlen = sz;
+            ctx->iv_state = IV_STATE_UNINITIALISED;
+        }
     }
     p = OSSL_PARAM_locate_const(params, OSSL_CIPHER_PARAM_KEYLEN);
     if (p != NULL) {

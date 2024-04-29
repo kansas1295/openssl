@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -29,13 +29,15 @@ static int tls_dump_gets(BIO *bp, char *buf, int size);
 static int tls_dump_puts(BIO *bp, const char *str);
 
 /* Choose a sufficiently large type likely to be unused for this custom BIO */
-#define BIO_TYPE_TLS_DUMP_FILTER  (0x80 | BIO_TYPE_FILTER)
+#define BIO_TYPE_TLS_DUMP_FILTER   (0x80 | BIO_TYPE_FILTER)
 #define BIO_TYPE_MEMPACKET_TEST    0x81
 #define BIO_TYPE_ALWAYS_RETRY      0x82
+#define BIO_TYPE_MAYBE_RETRY       (0x83 | BIO_TYPE_FILTER)
 
 static BIO_METHOD *method_tls_dump = NULL;
 static BIO_METHOD *meth_mem = NULL;
 static BIO_METHOD *meth_always_retry = NULL;
+static BIO_METHOD *meth_maybe_retry = NULL;
 static int retry_err = -1;
 
 /* Note: Not thread safe! */
@@ -804,6 +806,100 @@ static int always_retry_puts(BIO *bio, const char *str)
     return retry_err;
 }
 
+struct maybe_retry_data_st {
+    unsigned int retrycnt;
+};
+
+static int maybe_retry_new(BIO *bi);
+static int maybe_retry_free(BIO *a);
+static int maybe_retry_write(BIO *b, const char *in, int inl);
+static long maybe_retry_ctrl(BIO *b, int cmd, long num, void *ptr);
+
+const BIO_METHOD *bio_s_maybe_retry(void)
+{
+    if (meth_maybe_retry == NULL) {
+        if (!TEST_ptr(meth_maybe_retry = BIO_meth_new(BIO_TYPE_MAYBE_RETRY,
+                                                      "Maybe Retry"))
+            || !TEST_true(BIO_meth_set_write(meth_maybe_retry,
+                                             maybe_retry_write))
+            || !TEST_true(BIO_meth_set_ctrl(meth_maybe_retry,
+                                            maybe_retry_ctrl))
+            || !TEST_true(BIO_meth_set_create(meth_maybe_retry,
+                                              maybe_retry_new))
+            || !TEST_true(BIO_meth_set_destroy(meth_maybe_retry,
+                                               maybe_retry_free)))
+            return NULL;
+    }
+    return meth_maybe_retry;
+}
+
+void bio_s_maybe_retry_free(void)
+{
+    BIO_meth_free(meth_maybe_retry);
+}
+
+static int maybe_retry_new(BIO *bio)
+{
+    struct maybe_retry_data_st *data = OPENSSL_zalloc(sizeof(*data));
+
+    if (data == NULL)
+        return 0;
+
+    BIO_set_data(bio, data);
+    BIO_set_init(bio, 1);
+    return 1;
+}
+
+static int maybe_retry_free(BIO *bio)
+{
+    struct maybe_retry_data_st *data = BIO_get_data(bio);
+
+    OPENSSL_free(data);
+    BIO_set_data(bio, NULL);
+    BIO_set_init(bio, 0);
+    return 1;
+}
+
+static int maybe_retry_write(BIO *bio, const char *in, int inl)
+{
+    struct maybe_retry_data_st *data = BIO_get_data(bio);
+
+    if (data == NULL)
+        return -1;
+
+    if (data->retrycnt == 0) {
+        BIO_set_retry_write(bio);
+        return -1;
+    }
+    data->retrycnt--;
+
+    return BIO_write(BIO_next(bio), in, inl);
+}
+
+static long maybe_retry_ctrl(BIO *bio, int cmd, long num, void *ptr)
+{
+    struct maybe_retry_data_st *data = BIO_get_data(bio);
+
+    if (data == NULL)
+        return 0;
+
+    switch (cmd) {
+    case MAYBE_RETRY_CTRL_SET_RETRY_AFTER_CNT:
+        data->retrycnt = num;
+        return 1;
+
+    case BIO_CTRL_FLUSH:
+        if (data->retrycnt == 0) {
+            BIO_set_retry_write(bio);
+            return -1;
+        }
+        data->retrycnt--;
+        /* fall through */
+    default:
+        return BIO_ctrl(BIO_next(bio), cmd, num, ptr);
+    }
+}
+
 int create_ssl_ctx_pair(OSSL_LIB_CTX *libctx, const SSL_METHOD *sm,
                         const SSL_METHOD *cm, int min_proto_version,
                         int max_proto_version, SSL_CTX **sctx, SSL_CTX **cctx,
@@ -884,6 +980,7 @@ int create_ssl_ctx_pair(OSSL_LIB_CTX *libctx, const SSL_METHOD *sm,
 #define MAXLOOPS    1000000
 
 #if defined(OSSL_USE_SOCKETS)
+
 int wait_until_sock_readable(int sock)
 {
     fd_set readfds;
@@ -984,6 +1081,7 @@ int create_ssl_objects2(SSL_CTX *serverctx, SSL_CTX *clientctx, SSL **sssl,
 {
     SSL *serverssl = NULL, *clientssl = NULL;
     BIO *s_to_c_bio = NULL, *c_to_s_bio = NULL;
+    BIO_POLL_DESCRIPTOR rdesc = {0}, wdesc = {0};
 
     if (*sssl != NULL)
         serverssl = *sssl;
@@ -998,8 +1096,29 @@ int create_ssl_objects2(SSL_CTX *serverctx, SSL_CTX *clientctx, SSL **sssl,
             || !TEST_ptr(c_to_s_bio = BIO_new_socket(cfd, BIO_NOCLOSE)))
         goto error;
 
+    if (!TEST_false(SSL_get_rpoll_descriptor(clientssl, &rdesc)
+        || !TEST_false(SSL_get_wpoll_descriptor(clientssl, &wdesc))))
+        goto error;
+
     SSL_set_bio(clientssl, c_to_s_bio, c_to_s_bio);
     SSL_set_bio(serverssl, s_to_c_bio, s_to_c_bio);
+
+    if (!TEST_true(SSL_get_rpoll_descriptor(clientssl, &rdesc))
+        || !TEST_true(SSL_get_wpoll_descriptor(clientssl, &wdesc))
+        || !TEST_int_eq(rdesc.type, BIO_POLL_DESCRIPTOR_TYPE_SOCK_FD)
+        || !TEST_int_eq(wdesc.type, BIO_POLL_DESCRIPTOR_TYPE_SOCK_FD)
+        || !TEST_int_eq(rdesc.value.fd, cfd)
+        || !TEST_int_eq(wdesc.value.fd, cfd))
+        goto error;
+
+    if (!TEST_true(SSL_get_rpoll_descriptor(serverssl, &rdesc))
+        || !TEST_true(SSL_get_wpoll_descriptor(serverssl, &wdesc))
+        || !TEST_int_eq(rdesc.type, BIO_POLL_DESCRIPTOR_TYPE_SOCK_FD)
+        || !TEST_int_eq(wdesc.type, BIO_POLL_DESCRIPTOR_TYPE_SOCK_FD)
+        || !TEST_int_eq(rdesc.value.fd, sfd)
+        || !TEST_int_eq(wdesc.value.fd, sfd))
+        goto error;
+
     *sssl = serverssl;
     *cssl = clientssl;
     return 1;
@@ -1011,6 +1130,14 @@ int create_ssl_objects2(SSL_CTX *serverctx, SSL_CTX *clientctx, SSL **sssl,
     BIO_free(c_to_s_bio);
     return 0;
 }
+
+#else
+
+int wait_until_sock_readable(int sock)
+{
+    return 0;
+}
+
 #endif /* defined(OSSL_USE_SOCKETS) */
 
 /*
@@ -1237,4 +1364,90 @@ void shutdown_ssl_connection(SSL *serverssl, SSL *clientssl)
     SSL_shutdown(serverssl);
     SSL_free(serverssl);
     SSL_free(clientssl);
+}
+
+SSL_SESSION *create_a_psk(SSL *ssl, size_t mdsize)
+{
+    const SSL_CIPHER *cipher = NULL;
+    const unsigned char key[SHA384_DIGEST_LENGTH] = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+        0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b,
+        0x2c, 0x2d, 0x2e, 0x2f
+    };
+    SSL_SESSION *sess = NULL;
+
+    if (mdsize == SHA384_DIGEST_LENGTH) {
+        cipher = SSL_CIPHER_find(ssl, TLS13_AES_256_GCM_SHA384_BYTES);
+    } else if (mdsize == SHA256_DIGEST_LENGTH) {
+        /*
+         * Any ciphersuite using SHA256 will do - it will be compatible with
+         * the actual ciphersuite selected as long as it too is based on SHA256
+         */
+        cipher = SSL_CIPHER_find(ssl, TLS13_AES_128_GCM_SHA256_BYTES);
+    } else {
+        /* Should not happen */
+        return NULL;
+    }
+    sess = SSL_SESSION_new();
+    if (!TEST_ptr(sess)
+            || !TEST_ptr(cipher)
+            || !TEST_true(SSL_SESSION_set1_master_key(sess, key, mdsize))
+            || !TEST_true(SSL_SESSION_set_cipher(sess, cipher))
+            || !TEST_true(
+                    SSL_SESSION_set_protocol_version(sess,
+                                                     TLS1_3_VERSION))) {
+        SSL_SESSION_free(sess);
+        return NULL;
+    }
+    return sess;
+}
+
+#define NUM_EXTRA_CERTS 40
+
+int ssl_ctx_add_large_cert_chain(OSSL_LIB_CTX *libctx, SSL_CTX *sctx,
+                                 const char *cert_file)
+{
+    BIO *certbio = NULL;
+    X509 *chaincert = NULL;
+    int certlen;
+    int ret = 0;
+    int i;
+
+    if (!TEST_ptr(certbio = BIO_new_file(cert_file, "r")))
+        goto end;
+
+    if (!TEST_ptr(chaincert = X509_new_ex(libctx, NULL)))
+        goto end;
+
+    if (PEM_read_bio_X509(certbio, &chaincert, NULL, NULL) == NULL)
+        goto end;
+    BIO_free(certbio);
+    certbio = NULL;
+
+    /*
+     * We assume the supplied certificate is big enough so that if we add
+     * NUM_EXTRA_CERTS it will make the overall message large enough. The
+     * default buffer size is requested to be 16k, but due to the way BUF_MEM
+     * works, it ends up allocating a little over 21k (16 * 4/3). So, in this
+     * test we need to have a message larger than that.
+     */
+    certlen = i2d_X509(chaincert, NULL);
+    OPENSSL_assert(certlen * NUM_EXTRA_CERTS >
+                   (SSL3_RT_MAX_PLAIN_LENGTH * 4) / 3);
+    for (i = 0; i < NUM_EXTRA_CERTS; i++) {
+        if (!X509_up_ref(chaincert))
+            goto end;
+        if (!SSL_CTX_add_extra_chain_cert(sctx, chaincert)) {
+            X509_free(chaincert);
+            goto end;
+        }
+    }
+
+    ret = 1;
+ end:
+    BIO_free(certbio);
+    X509_free(chaincert);
+    return ret;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2018-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -95,7 +95,7 @@ int ktls_configure_crypto(OSSL_LIB_CTX *libctx, int version, const EVP_CIPHER *c
             return 0;
         if (EVP_MD_is_a(md, "SHA1"))
             crypto_info->auth_algorithm = CRYPTO_SHA1_HMAC;
-        else if (EVP_MD_is_a(md, "SHA2-256")) {
+        else if (EVP_MD_is_a(md, "SHA2-256"))
             crypto_info->auth_algorithm = CRYPTO_SHA2_256_HMAC;
         else if (EVP_MD_is_a(md, "SHA2-384"))
             crypto_info->auth_algorithm = CRYPTO_SHA2_384_HMAC;
@@ -417,9 +417,8 @@ ktls_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
     int ret;
 
     ret = tls_int_new_record_layer(libctx, propq, vers, role, direction, level,
-                                   key, keylen, iv, ivlen, mackey, mackeylen,
-                                   ciph, taglen, mactype, md, comp, prev,
-                                   transport, next, local, peer, settings,
+                                   ciph, taglen, md, comp, prev,
+                                   transport, next, settings,
                                    options, fns, cbarg, retrl);
 
     if (ret != OSSL_RECORD_RETURN_SUCCESS)
@@ -493,7 +492,7 @@ static int ktls_initialise_write_packets(OSSL_RECORD_LAYER *rl,
 static int ktls_prepare_record_header(OSSL_RECORD_LAYER *rl,
                                       WPACKET *thispkt,
                                       OSSL_RECORD_TEMPLATE *templ,
-                                      unsigned int rectype,
+                                      uint8_t rectype,
                                       unsigned char **recdata)
 {
     /* The kernel writes the record header, so nothing to do */

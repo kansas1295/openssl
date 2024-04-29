@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -339,7 +339,8 @@ static int ossl_x509_store_ctx_get_by_subject(const X509_STORE_CTX *ctx,
     if (!sk_X509_OBJECT_is_sorted(store->objs)) {
         X509_STORE_unlock(store);
         /* Take a write lock instead of a read lock */
-        X509_STORE_lock(store);
+        if (!X509_STORE_lock(store))
+            return 0;
         /*
          * Another thread might have sorted it in the meantime. But if so,
          * sk_X509_OBJECT_sort() exits early.
@@ -580,6 +581,36 @@ X509_OBJECT *X509_OBJECT_retrieve_by_subject(STACK_OF(X509_OBJECT) *h,
 STACK_OF(X509_OBJECT) *X509_STORE_get0_objects(const X509_STORE *xs)
 {
     return xs->objs;
+}
+
+static X509_OBJECT *x509_object_dup(const X509_OBJECT *obj)
+{
+    X509_OBJECT *ret = X509_OBJECT_new();
+    if (ret == NULL)
+        return NULL;
+
+    ret->type = obj->type;
+    ret->data = obj->data;
+    X509_OBJECT_up_ref_count(ret);
+    return ret;
+}
+
+STACK_OF(X509_OBJECT) *X509_STORE_get1_objects(X509_STORE *store)
+{
+    STACK_OF(X509_OBJECT) *objs;
+
+    if (store == NULL) {
+        ERR_raise(ERR_LIB_X509, ERR_R_PASSED_NULL_PARAMETER);
+        return NULL;
+    }
+
+    if (!x509_store_read_lock(store))
+        return NULL;
+
+    objs = sk_X509_OBJECT_deep_copy(store->objs, x509_object_dup,
+                                    X509_OBJECT_free);
+    X509_STORE_unlock(store);
+    return objs;
 }
 
 STACK_OF(X509) *X509_STORE_get1_all_certs(X509_STORE *store)

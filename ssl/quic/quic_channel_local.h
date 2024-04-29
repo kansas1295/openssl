@@ -5,6 +5,12 @@
 
 # ifndef OPENSSL_NO_QUIC
 
+#  include <openssl/lhash.h>
+#  include "internal/list.h"
+#  include "internal/quic_predef.h"
+#  include "internal/quic_fc.h"
+#  include "internal/quic_stream_map.h"
+
 /*
  * QUIC Channel Structure
  * ======================
@@ -22,22 +28,13 @@
  * Other components should not include this header.
  */
 struct quic_channel_st {
-    OSSL_LIB_CTX                    *libctx;
-    const char                      *propq;
+    QUIC_PORT                       *port;
 
     /*
-     * Master synchronisation mutex used for thread assisted mode
-     * synchronisation. We don't own this; the instantiator of the channel
-     * passes it to us and is responsible for freeing it after channel
-     * destruction.
+     * QUIC_PORT keeps the channels which belong to it on a list for bookkeeping
+     * purposes.
      */
-    CRYPTO_MUTEX                    *mutex;
-
-    /*
-     * Callback used to get the current time.
-     */
-    OSSL_TIME                       (*now_cb)(void *arg);
-    void                            *now_cb_arg;
+    OSSL_LIST_MEMBER(ch, struct quic_channel_st);
 
     /*
      * The associated TLS 1.3 connection data. Used to provide the handshake
@@ -47,20 +44,22 @@ struct quic_channel_st {
     QUIC_TLS                        *qtls;
     SSL                             *tls;
 
+    /* Port LCIDM we use to register LCIDs. */
+    QUIC_LCIDM                      *lcidm;
+    /* SRTM we register SRTs with. */
+    QUIC_SRTM                       *srtm;
+
+    /* Optional QLOG instance (or NULL). */
+    QLOG                            *qlog;
+
     /*
      * The transport parameter block we will send or have sent.
      * Freed after sending or when connection is freed.
      */
     unsigned char                   *local_transport_params;
 
-    /* Asynchronous I/O reactor. */
-    QUIC_REACTOR                    rtor;
-
     /* Our current L4 peer address, if any. */
     BIO_ADDR                        cur_peer_addr;
-
-    /* Network-side read and write BIOs. */
-    BIO                             *net_rbio, *net_wbio;
 
     /*
      * Subcomponents of the connection. All of these components are instantiated
@@ -74,7 +73,7 @@ struct quic_channel_st {
      * MAX_STREAMS signalling.
      */
     QUIC_TXFC                       conn_txfc;
-    QUIC_RXFC                       conn_rxfc;
+    QUIC_RXFC                       conn_rxfc, crypto_rxfc[QUIC_PN_SPACE_NUM];
     QUIC_RXFC                       max_streams_bidi_rxfc, max_streams_uni_rxfc;
     QUIC_STREAM_MAP                 qsm;
     OSSL_STATM                      statm;
@@ -82,14 +81,7 @@ struct quic_channel_st {
     const OSSL_CC_METHOD            *cc_method;
     OSSL_ACKM                       *ackm;
 
-    /*
-     * RX demuxer. We register incoming DCIDs with this. Since we currently only
-     * support client operation and use one L4 port per connection, we own the
-     * demuxer and register a single zero-length DCID with it.
-     */
-    QUIC_DEMUX                      *demux;
-
-    /* Record layers in the TX and RX directions, plus the RX demuxer. */
+    /* Record layers in the TX and RX directions. */
     OSSL_QTX                        *qtx;
     OSSL_QRX                        *qrx;
 
@@ -127,12 +119,15 @@ struct quic_channel_st {
      */
     QUIC_CONN_ID                    retry_scid;
 
-    /* The DCID we currently use to talk to the peer and its sequence num. */
+    /* Server only: The DCID we currently expect the peer to use to talk to us. */
+    QUIC_CONN_ID                    cur_local_cid;
+
+    /*
+     * The DCID we currently use to talk to the peer and its sequence num.
+     */
     QUIC_CONN_ID                    cur_remote_dcid;
     uint64_t                        cur_remote_seq_num;
     uint64_t                        cur_retire_prior_to;
-    /* Server only: The DCID we currently expect the peer to use to talk to us. */
-    QUIC_CONN_ID                    cur_local_cid;
 
     /* Transport parameter values we send to our peer. */
     uint64_t                        tx_init_max_stream_data_bidi_local;
@@ -147,6 +142,9 @@ struct quic_channel_st {
     uint64_t                        rx_max_ack_delay; /* ms */
     unsigned char                   rx_ack_delay_exp;
 
+    /* Diagnostic counters for testing purposes only. May roll over. */
+    uint16_t                        diag_num_rx_ack; /* Number of ACK frames received */
+
     /*
      * Temporary staging area to store information about the incoming packet we
      * are currently processing.
@@ -159,6 +157,10 @@ struct quic_channel_st {
      */
     uint64_t                        max_local_streams_bidi;
     uint64_t                        max_local_streams_uni;
+
+    /* The idle timeout values we and our peer requested. */
+    uint64_t                        max_idle_timeout_local_req;
+    uint64_t                        max_idle_timeout_remote_req;
 
     /* The negotiated maximum idle timeout in milliseconds. */
     uint64_t                        max_idle_timeout;
@@ -258,7 +260,7 @@ struct quic_channel_st {
      * state of the connection's lifecycle, but more fine-grained conditions of
      * the Active state are tracked via flags below. For more details, see
      * doc/designs/quic-design/connection-state-machine.md. We are in the Open
-     * state if the state is QUIC_CSM_STATE_ACTIVE and handshake_confirmed is
+     * state if the state is QUIC_CHANNEL_STATE_ACTIVE and handshake_confirmed is
      * set.
      */
     unsigned int                    state                   : 3;
@@ -269,6 +271,13 @@ struct quic_channel_st {
      *  be received and should be ignored if they do occur.)
      */
     unsigned int                    have_received_enc_pkt   : 1;
+
+    /*
+     * Have we successfully processed any packet, including a Version
+     * Negotiation packet? If so, further Version Negotiation packets should be
+     * ignored.
+     */
+    unsigned int                    have_processed_any_pkt  : 1;
 
     /*
      * Have we sent literally any packet yet? If not, there is no point polling
@@ -283,6 +292,8 @@ struct quic_channel_st {
 
     /* We have received transport parameters from the peer. */
     unsigned int                    got_remote_transport_params    : 1;
+    /* We have generated our local transport parameters. */
+    unsigned int                    got_local_transport_params     : 1;
 
     /*
      * This monotonically transitions to 1 once the TLS state machine is
@@ -347,6 +358,11 @@ struct quic_channel_st {
      */
     unsigned int                    have_new_rx_secret      : 1;
 
+    /* Have we ever called QUIC_TLS yet during RX processing? */
+    unsigned int                    did_tls_tick            : 1;
+    /* Has any CRYPTO frame been processed during this tick? */
+    unsigned int                    did_crypto_frame        : 1;
+
     /*
      * Have we sent an ack-eliciting packet since the last successful packet
      * reception? Used to determine when to bump idle timer (see RFC 9000 s.
@@ -404,8 +420,32 @@ struct quic_channel_st {
     /* Permanent net error encountered */
     unsigned int                    net_error                           : 1;
 
+    /*
+     * Protocol error encountered. Note that you should refer to the state field
+     * rather than this. This is only used so we can ignore protocol errors
+     * after the first protocol error, but still record the first protocol error
+     * if it happens during the TERMINATING state.
+     */
+    unsigned int                    protocol_error                      : 1;
+
+    /* Are we using addressed mode? */
+    unsigned int                    addressed_mode                      : 1;
+
+    /* Are we on the QUIC_PORT linked list of channels? */
+    unsigned int                    on_port_list                        : 1;
+
+    /* Has qlog been requested? */
+    unsigned int                    use_qlog                            : 1;
+
     /* Saved error stack in case permanent error was encountered */
     ERR_STATE                       *err_state;
+
+    /* Scratch area for use by RXDP to store decoded ACK ranges. */
+    OSSL_QUIC_ACK_RANGE             *ack_range_scratch;
+    size_t                          num_ack_range_scratch;
+
+    /* Title for qlog purposes. We own this copy. */
+    char                            *qlog_title;
 };
 
 # endif

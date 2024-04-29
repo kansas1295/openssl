@@ -1,5 +1,5 @@
 /*
-* Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+* Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
 *
 * Licensed under the Apache License 2.0 (the "License").  You may not use
 * this file except in compliance with the License.  You can obtain a copy
@@ -14,6 +14,7 @@
 #include "internal/e_os.h"
 #include "internal/time.h"
 #include "internal/quic_types.h"
+#include "internal/quic_predef.h"
 #include "internal/quic_wire.h"
 #include "internal/quic_record_tx.h"
 #include "internal/quic_record_rx.h"
@@ -51,7 +52,6 @@
  * datagrams. The terms 'send' and 'receive' are used when referring to the
  * stream abstraction. Applications send; we transmit.
  */
-typedef struct quic_sstream_st QUIC_SSTREAM;
 
 /*
  * Instantiates a new QUIC_SSTREAM. init_buf_size specifies the initial size of
@@ -312,7 +312,6 @@ void ossl_quic_sstream_set_cleanse(QUIC_SSTREAM *qss, int cleanse);
  * (i.e., for a unidirectional receiving stream or for the receiving component
  * of a bidirectional stream).
  */
-typedef struct quic_rstream_st QUIC_RSTREAM;
 
 /*
  * Create a new instance of QUIC_RSTREAM with pointers to the flow

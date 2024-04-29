@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -553,18 +553,18 @@ _${prefix}_consts:
 	.long 0xA0A7AEB5, 0xBCC3CAD1, 0xD8DFE6ED, 0xF4FB0209
 	.long 0x10171E25, 0x2C333A41, 0x484F565D, 0x646B7279
 .Lfk:
-	.dword 0x56aa3350a3b1bac6,0xb27022dc677d9197
+	.quad 0x56aa3350a3b1bac6,0xb27022dc677d9197
 .Lshuffles:
-	.dword 0x0B0A090807060504,0x030201000F0E0D0C
+	.quad 0x0B0A090807060504,0x030201000F0E0D0C
 .Lxts_magic:
-	.dword 0x0101010101010187,0x0101010101010101
+	.quad 0x0101010101010187,0x0101010101010101
 .Lsbox_magic:
-	.dword 0x0b0e0104070a0d00,0x0306090c0f020508
-	.dword 0x62185a2042387a00,0x22581a6002783a40
-	.dword 0x15df62a89e54e923,0xc10bb67c4a803df7
-	.dword 0xb9aa6b78c1d21300,0x1407c6d56c7fbead
-	.dword 0x6404462679195b3b,0xe383c1a1fe9edcbc
-	.dword 0x0f0f0f0f0f0f0f0f,0x0f0f0f0f0f0f0f0f
+	.quad 0x0b0e0104070a0d00,0x0306090c0f020508
+	.quad 0x62185a2042387a00,0x22581a6002783a40
+	.quad 0x15df62a89e54e923,0xc10bb67c4a803df7
+	.quad 0xb9aa6b78c1d21300,0x1407c6d56c7fbead
+	.quad 0x6404462679195b3b,0xe383c1a1fe9edcbc
+	.quad 0x0f0f0f0f0f0f0f0f,0x0f0f0f0f0f0f0f0f
 
 .size	_${prefix}_consts,.-_${prefix}_consts
 ___
@@ -927,7 +927,7 @@ ___
 $code.=<<___;
 	ld1	{$ivec1.4s},[$ivp]
 	ld1	{@datax[0].4s,@datax[1].4s,@datax[2].4s,@datax[3].4s},[$inp],#64
-	// note ivec1 and vtmpx[3] are resuing the same register
+	// note ivec1 and vtmpx[3] are reusing the same register
 	// care needs to be taken to avoid conflict
 	eor	@vtmp[0].16b,@vtmp[0].16b,$ivec1.16b
 	ld1	{@vtmpx[0].4s,@vtmpx[1].4s,@vtmpx[2].4s,@vtmpx[3].4s},[$inp],#64
@@ -1469,7 +1469,7 @@ $code.=<<___;
 	mov @tweak[1].16b,@tweak[0].16b
 ___
 	&rev32_armeb(@tweak[1],@tweak[1]);
-	&compute_tweak_vec(@tweak[1],@tweak[2]);
+	&compute_tweak_vec(@tweak[1],@tweak[2],$std);
 $code.=<<___;
 	b .check_dec${std}
 
@@ -1479,12 +1479,12 @@ $code.=<<___;
 .check_dec${std}:
 	// encryption:1 decryption:0
 	cmp $enc,1
-	b.eq .prcess_last_2blks${std}
+	b.eq .process_last_2blks${std}
 	mov @vtmp[0].16B,@tweak[1].16b
 	mov @tweak[1].16B,@tweak[2].16b
 	mov @tweak[2].16B,@vtmp[0].16b
 
-.prcess_last_2blks${std}:
+.process_last_2blks${std}:
 ___
 	&rev32_armeb(@tweak[1],@tweak[1]);
 	&rev32_armeb(@tweak[2],@tweak[2]);

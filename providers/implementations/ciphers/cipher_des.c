@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -96,6 +96,7 @@ static int des_init(void *vctx, const unsigned char *key, size_t keylen,
         }
         if (!ctx->hw->init(ctx, key, keylen))
             return 0;
+        ctx->key_set = 1;
     }
     return ossl_cipher_generic_set_ctx_params(ctx, params);
 }

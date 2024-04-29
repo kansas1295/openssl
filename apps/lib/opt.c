@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -726,7 +726,12 @@ int opt_verify(int opt, X509_VERIFY_PARAM *vpm)
             opt_printf_stderr("%s: Invalid Policy %s\n", prog, opt_arg());
             return 0;
         }
-        X509_VERIFY_PARAM_add0_policy(vpm, otmp);
+        if (!X509_VERIFY_PARAM_add0_policy(vpm, otmp)) {
+            ASN1_OBJECT_free(otmp);
+            opt_printf_stderr("%s: Internal error adding Policy %s\n",
+                              prog, opt_arg());
+            return 0;
+        }
         break;
     case OPT_V_PURPOSE:
         /* purpose name -> purpose index */

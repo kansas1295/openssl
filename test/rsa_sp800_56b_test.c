@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2018-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -458,6 +458,10 @@ static int test_invalid_keypair(void)
           && TEST_true(BN_add_word(n, 1))
           && TEST_false(ossl_rsa_sp800_56b_check_keypair(key, NULL, -1, 2048))
           && TEST_true(BN_sub_word(n, 1))
+          /* check that validation fails if len(n) is not even */
+          && TEST_true(BN_lshift1(n, n))
+          && TEST_false(ossl_rsa_sp800_56b_check_keypair(key, NULL, -1, 2049))
+          && TEST_true(BN_rshift1(n, n))
           /* check p  */
           && TEST_true(BN_sub_word(p, 2))
           && TEST_true(BN_mul(n, p, q, ctx))

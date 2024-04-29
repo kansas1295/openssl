@@ -1,5 +1,5 @@
 /*
- * Copyright 2003-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2003-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -247,7 +247,7 @@ static int buf2hexstr_sep(char *str, size_t str_n, size_t *strlength,
     *q = CH_ZERO;
 
 #ifdef CHARSET_EBCDIC
-    ebcdic2ascii(str, str, q - str - 1);
+    ebcdic2ascii(str, str, q - str);
 #endif
     return 1;
 }
@@ -279,13 +279,13 @@ char *ossl_buf2hexstr_sep(const unsigned char *buf, long buflen, char sep)
 
 
 /*
- * Given a buffer of length 'len' return a OPENSSL_malloc'ed string with its
- * hex representation @@@ (Contents of buffer are always kept in ASCII, also
- * on EBCDIC machines)
+ * Given a buffer of length 'buflen' return a OPENSSL_malloc'ed string with
+ * its hex representation @@@ (Contents of buffer are always kept in ASCII,
+ * also on EBCDIC machines)
  */
 char *OPENSSL_buf2hexstr(const unsigned char *buf, long buflen)
 {
-    return ossl_buf2hexstr_sep(buf, buflen, ':');
+    return ossl_buf2hexstr_sep(buf, buflen, DEFAULT_SEPARATOR);
 }
 
 int openssl_strerror_r(int errnum, char *buf, size_t buflen)

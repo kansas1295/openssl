@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2015-2021 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2024 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -16,7 +16,7 @@ use OpenSSL::Test qw/:DEFAULT srctop_file/;
 
 setup("test_x509");
 
-plan tests => 37;
+plan tests => 51;
 
 # Prevent MSys2 filename munging for arguments that look like file paths but
 # aren't
@@ -81,6 +81,15 @@ ok(run(app(["openssl", "pkey", "-in", $pkey, "-pubout", "-out", $pubkey]))
 # not unlinking $pubkey
 # not unlinking $selfout
 
+# test -set_issuer option
+my $ca_issu = srctop_file(@certs, "ca-cert.pem"); # issuer cert
+my $caout_issu = "ca-issu.out";
+ok(run(app(["openssl", "x509", "-new", "-force_pubkey", $key, "-subj", "/CN=EE",
+            "-set_issuer", "/CN=TEST-CA", "-extfile", $extfile, "-CA", $ca_issu,
+            "-CAkey", $pkey, "-text", "-out", $caout_issu])));
+ok(get_issuer($caout_issu) =~ /CN=TEST-CA/);
+# not unlinking $caout
+
 # simple way of directly producing a CA-signed cert with private/pubkey input
 my $ca = srctop_file(@certs, "ca-cert.pem"); # issuer cert
 my $caout = "ca-issued.out";
@@ -109,6 +118,30 @@ subtest 'x509 -- pathlen' => sub {
 cert_contains(srctop_file(@certs, "fake-gp.pem"),
               "2.16.528.1.1003.1.3.5.5.2-1-0000006666-Z-12345678-01.015-12345678",
               1, 'x500 -- subjectAltName');
+
+cert_contains(srctop_file(@certs, "ext-noAssertion.pem"),
+              "No Assertion",
+              1, 'X.509 Not Assertion Extension');
+
+cert_contains(srctop_file(@certs, "ext-groupAC.pem"),
+              "Group Attribute Certificate",
+              1, 'X.509 Group Attribute Certificate Extension');
+
+cert_contains(srctop_file(@certs, "ext-sOAIdentifier.pem"),
+              "Source of Authority",
+              1, 'X.509 Source of Authority Extension');
+
+cert_contains(srctop_file(@certs, "ext-noRevAvail.pem"),
+              "No Revocation Available",
+              1, 'X.509 No Revocation Available');
+
+cert_contains(srctop_file(@certs, "ext-singleUse.pem"),
+              "Single Use",
+              1, 'X509v3 Single Use');
+
+cert_contains(srctop_file(@certs, "ext-indirectIssuer.pem"),
+              "Indirect Issuer",
+              1, 'X.509 Indirect Issuer');
 
 sub test_errors { # actually tests diagnostics of OSSL_STORE
     my ($expected, $cert, @opts) = @_;
@@ -154,20 +187,6 @@ ok(!run(app(["openssl", "x509", "-noout", "-dates", "-dateopt", "invalid_format"
 	     "-in", srctop_file("test/certs", "ca-cert.pem")])),
    "Run with invalid -dateopt format");
 
-# extracts issuer from a -text formatted-output
-sub get_issuer {
-    my $f = shift(@_);
-    my $issuer = "";
-    open my $fh, $f or die;
-    while (my $line = <$fh>) {
-        if ($line =~ /Issuer:/) {
-            $issuer = $line;
-        }
-    }
-    close $fh;
-    return $issuer;
-}
-
 # Tests for signing certs (broken in 1.1.1o)
 my $a_key = "a-key.pem";
 my $a_cert = "a-cert.pem";
@@ -191,7 +210,15 @@ ok(run(app(["openssl", "x509", "-in", $a_cert, "-CA", $ca_cert,
             "-CAkey", $ca_key, "-set_serial", "1234567890",
             "-preserve_dates", "-sha256", "-text", "-out", $a2_cert])));
 # verify issuer is CA
-ok (get_issuer($a2_cert) =~ /CN=ca.example.com/);
+ok(get_issuer($a2_cert) =~ /CN=ca.example.com/);
+
+my $in_csr = srctop_file('test', 'certs', 'x509-check.csr');
+my $in_key = srctop_file('test', 'certs', 'x509-check-key.pem');
+my $invextfile = srctop_file('test', 'invalid-x509.cnf');
+# Test that invalid extensions settings fail
+ok(!run(app(["openssl", "x509", "-req", "-in", $in_csr, "-signkey", $in_key,
+            "-out", "/dev/null", "-days", "3650" , "-extensions", "ext",
+            "-extfile", $invextfile])));
 
 # Tests for issue #16080 (fixed in 1.1.1o)
 my $b_key = "b-key.pem";
@@ -226,6 +253,53 @@ ok(run(app(["openssl", "x509", "-req", "-text", "-CAcreateserial",
             "-CA", $ca_cert_dot_in_dir, "-CAkey", $ca_key,
             "-in", $b_csr])));
 ok(-e $ca_serial_dot_in_dir);
+
+# Tests for explict start and end dates of certificates
+my %today = (strftime("%Y-%m-%d", gmtime) => 1);
+my $enddate;
+ok(run(app(["openssl", "x509", "-req", "-text",
+	    "-key", $b_key,
+	    "-not_before", "20231031000000Z",
+	    "-not_after", "today",
+            "-in", $b_csr, "-out", $b_cert]))
+&& get_not_before($b_cert) =~ /Oct 31 00:00:00 2023 GMT/
+&& ++$today{strftime("%Y-%m-%d", gmtime)}
+&& (grep { defined $today{$_} } get_not_after_date($b_cert)));
+# explicit start and end dates
+ok(run(app(["openssl", "x509", "-req", "-text",
+	    "-key", $b_key,
+	    "-not_before", "20231031000000Z",
+	    "-not_after", "20231231000000Z",
+	    "-days", "99",
+            "-in", $b_csr, "-out", $b_cert]))
+&& get_not_before($b_cert) =~ /Oct 31 00:00:00 2023 GMT/
+&& get_not_after($b_cert) =~ /Dec 31 00:00:00 2023 GMT/);
+# start date today and days
+%today = (strftime("%Y-%m-%d", gmtime) => 1);
+$enddate = strftime("%Y-%m-%d", gmtime(time + 99 * 24 * 60 * 60));
+ok(run(app(["openssl", "x509", "-req", "-text",
+	    "-key", $b_key,
+	    "-not_before", "today",
+	    "-days", "99",
+            "-in", $b_csr, "-out", $b_cert]))
+&& ++$today{strftime("%Y-%m-%d", gmtime)}
+&& (grep { defined $today{$_} } get_not_before_date($b_cert))
+&& get_not_after_date($b_cert) eq $enddate);
+# end date before start date
+ok(!run(app(["openssl", "x509", "-req", "-text",
+	      "-key", $b_key,
+	      "-not_before", "today",
+	      "-not_after", "20231031000000Z",
+              "-in", $b_csr, "-out", $b_cert])));
+# default days option
+%today = (strftime("%Y-%m-%d", gmtime) => 1);
+$enddate = strftime("%Y-%m-%d", gmtime(time + 30 * 24 * 60 * 60));
+ok(run(app(["openssl", "x509", "-req", "-text",
+	    "-key", $b_key,
+            "-in", $b_csr, "-out", $b_cert]))
+&& ++$today{strftime("%Y-%m-%d", gmtime)}
+&& (grep { defined $today{$_} } get_not_before_date($b_cert))
+&& get_not_after_date($b_cert) eq $enddate);
 
 SKIP: {
     skip "EC is not supported by this OpenSSL build", 1

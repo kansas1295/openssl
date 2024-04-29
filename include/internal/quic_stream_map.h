@@ -1,5 +1,5 @@
 /*
-* Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+* Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
 *
 * Licensed under the Apache License 2.0 (the "License").  You may not use
 * this file except in compliance with the License.  You can obtain a copy
@@ -15,6 +15,7 @@
 # include "internal/time.h"
 # include "internal/common.h"
 # include "internal/quic_types.h"
+# include "internal/quic_predef.h"
 # include "internal/quic_stream.h"
 # include "internal/quic_fc.h"
 # include <openssl/lhash.h>
@@ -27,7 +28,6 @@
  *
  * Logical QUIC stream composing all relevant send and receive components.
  */
-typedef struct quic_stream_st QUIC_STREAM;
 
 typedef struct quic_stream_list_node_st QUIC_STREAM_LIST_NODE;
 
@@ -297,8 +297,8 @@ struct quic_stream_st {
      *            reasonably certain no benefit would be gained by sending
      *            STOP_SENDING.]
      *
-     *            TODO(QUIC): Implement the latter case (currently we just
-     *                        always do STOP_SENDING).
+     *            TODO(QUIC FUTURE): Implement the latter case (currently we
+                                     just always do STOP_SENDING).
      *
      *         and;
      *
@@ -312,6 +312,8 @@ struct quic_stream_st {
     unsigned int    deleted                 : 1;
     /* Set to 1 once the above conditions are actually met. */
     unsigned int    ready_for_gc            : 1;
+    /* Set to 1 if this is currently counted in the shutdown flush stream count. */
+    unsigned int    shutdown_flush          : 1;
 };
 
 #define QUIC_STREAM_INITIATOR_CLIENT        0
@@ -502,6 +504,41 @@ static ossl_inline ossl_unused int ossl_quic_stream_recv_get_final_size(const QU
 }
 
 /*
+ * Determines the number of bytes available still to be read, and (if
+ * include_fin is 1) whether a FIN or reset has yet to be read.
+ */
+static ossl_inline ossl_unused int ossl_quic_stream_recv_pending(const QUIC_STREAM *s,
+                                                                 int include_fin)
+{
+    size_t avail;
+    int fin = 0;
+
+    switch (s->recv_state) {
+    default:
+    case QUIC_RSTREAM_STATE_NONE:
+        return 0;
+
+    case QUIC_RSTREAM_STATE_RECV:
+    case QUIC_RSTREAM_STATE_SIZE_KNOWN:
+    case QUIC_RSTREAM_STATE_DATA_RECVD:
+        if (!ossl_quic_rstream_available(s->rstream, &avail, &fin))
+            avail = 0;
+
+        if (avail == 0 && include_fin && fin)
+            avail = 1;
+
+        return avail;
+
+    case QUIC_RSTREAM_STATE_RESET_RECVD:
+        return include_fin;
+
+    case QUIC_RSTREAM_STATE_DATA_READ:
+    case QUIC_RSTREAM_STATE_RESET_READ:
+        return 0;
+    }
+}
+
+/*
  * QUIC Stream Map
  * ===============
  *
@@ -512,19 +549,20 @@ static ossl_inline ossl_unused int ossl_quic_stream_recv_get_final_size(const QU
  *   - allows iteration over the active streams only.
  *
  */
-typedef struct quic_stream_map_st {
+struct quic_stream_map_st {
     LHASH_OF(QUIC_STREAM)   *map;
     QUIC_STREAM_LIST_NODE   active_list;
     QUIC_STREAM_LIST_NODE   accept_list;
     QUIC_STREAM_LIST_NODE   ready_for_gc_list;
-    size_t                  rr_stepping, rr_counter, num_accept;
+    size_t                  rr_stepping, rr_counter;
+    size_t                  num_accept_bidi, num_accept_uni, num_shutdown_flush;
     QUIC_STREAM             *rr_cur;
     uint64_t                (*get_stream_limit_cb)(int uni, void *arg);
     void                    *get_stream_limit_cb_arg;
     QUIC_RXFC               *max_streams_bidi_rxfc;
     QUIC_RXFC               *max_streams_uni_rxfc;
     int                     is_server;
-} QUIC_STREAM_MAP;
+};
 
 /*
  * get_stream_limit is a callback which is called to retrieve the current stream
@@ -603,6 +641,17 @@ void ossl_quic_stream_map_update_state(QUIC_STREAM_MAP *qsm, QUIC_STREAM *s);
  * packets. The default value is 1.
  */
 void ossl_quic_stream_map_set_rr_stepping(QUIC_STREAM_MAP *qsm, size_t stepping);
+
+/*
+ * Returns 1 if the stream ordinal given is allowed by the current stream count
+ * flow control limit, assuming a locally initiated stream of a type described
+ * by is_uni.
+ *
+ * Note that stream_ordinal is a stream ordinal, not a stream ID.
+ */
+int ossl_quic_stream_map_is_local_allowed_by_stream_limit(QUIC_STREAM_MAP *qsm,
+                                                          uint64_t stream_ordinal,
+                                                          int is_uni);
 
 /*
  * Stream Send Part
@@ -792,14 +841,37 @@ void ossl_quic_stream_map_remove_from_accept_queue(QUIC_STREAM_MAP *qsm,
                                                    QUIC_STREAM *s,
                                                    OSSL_TIME rtt);
 
-/* Returns the length of the accept queue. */
-size_t ossl_quic_stream_map_get_accept_queue_len(QUIC_STREAM_MAP *qsm);
+/* Returns the length of the accept queue for the given stream type. */
+size_t ossl_quic_stream_map_get_accept_queue_len(QUIC_STREAM_MAP *qsm, int is_uni);
+
+/* Returns the total length of the accept queues for all stream types. */
+size_t ossl_quic_stream_map_get_total_accept_queue_len(QUIC_STREAM_MAP *qsm);
+
+/*
+ * Shutdown Flush and GC
+ * =====================
+ */
 
 /*
  * Delete streams ready for GC. Pointers to those QUIC_STREAM objects become
  * invalid.
  */
 void ossl_quic_stream_map_gc(QUIC_STREAM_MAP *qsm);
+
+/*
+ * Begins shutdown stream flush triage. Analyses all streams, including deleted
+ * but not yet GC'd streams, to determine if we should wait for that stream to
+ * be fully flushed before shutdown. After calling this, call
+ * ossl_quic_stream_map_is_shutdown_flush_finished() to determine if all
+ * shutdown flush eligible streams have been flushed.
+ */
+void ossl_quic_stream_map_begin_shutdown_flush(QUIC_STREAM_MAP *qsm);
+
+/*
+ * Returns 1 if all shutdown flush eligible streams have finished flushing,
+ * or if ossl_quic_stream_map_begin_shutdown_flush() has not been called.
+ */
+int ossl_quic_stream_map_is_shutdown_flush_finished(QUIC_STREAM_MAP *qsm);
 
 /*
  * QUIC Stream Iterator

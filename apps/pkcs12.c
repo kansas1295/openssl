@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1999-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -14,7 +14,6 @@
 #include <string.h>
 #include "apps.h"
 #include "progs.h"
-#include <openssl/conf.h>
 #include <openssl/asn1.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>
@@ -71,7 +70,7 @@ typedef enum OPTION_choice {
     OPT_NAME, OPT_CSP, OPT_CANAME,
     OPT_IN, OPT_OUT, OPT_PASSIN, OPT_PASSOUT, OPT_PASSWORD, OPT_CAPATH,
     OPT_CAFILE, OPT_CASTORE, OPT_NOCAPATH, OPT_NOCAFILE, OPT_NOCASTORE, OPT_ENGINE,
-    OPT_R_ENUM, OPT_PROV_ENUM,
+    OPT_R_ENUM, OPT_PROV_ENUM, OPT_JDKTRUST,
 #ifndef OPENSSL_NO_DES
     OPT_LEGACY_ALG
 #endif
@@ -154,6 +153,7 @@ const OPTIONS pkcs12_options[] = {
     {"maciter", OPT_MACITER, '-', "Unused, kept for backwards compatibility"},
     {"macsaltlen", OPT_MACSALTLEN, 'p', "Specify the salt len for MAC"},
     {"nomac", OPT_NOMAC, '-', "Don't generate MAC"},
+    {"jdktrust", OPT_JDKTRUST, 's', "Mark certificate in PKCS#12 store as trusted for JDK compatibility"},
     {NULL}
 };
 
@@ -165,6 +165,7 @@ int pkcs12_main(int argc, char **argv)
     char *name = NULL, *csp_name = NULL;
     char pass[PASSWD_BUF_SIZE] = "", macpass[PASSWD_BUF_SIZE] = "";
     int export_pkcs12 = 0, options = 0, chain = 0, twopass = 0, keytype = 0;
+    char *jdktrust = NULL;
 #ifndef OPENSSL_NO_DES
     int use_legacy = 0;
 #endif
@@ -221,6 +222,11 @@ int pkcs12_main(int argc, char **argv)
             break;
         case OPT_NOOUT:
             options |= (NOKEYS | NOCERTS);
+            break;
+        case OPT_JDKTRUST:
+            jdktrust = opt_arg();
+            /* Adding jdk trust implies nokeys */
+            options |= NOKEYS;
             break;
         case OPT_INFO:
             options |= INFO;
@@ -528,11 +534,7 @@ int pkcs12_main(int argc, char **argv)
         EVP_MD *macmd = NULL;
         unsigned char *catmp = NULL;
         int i;
-        CONF *conf = NULL;
         ASN1_OBJECT *obj = NULL;
-        STACK_OF(CONF_VALUE) *cb_sk = NULL;
-        const char *cb_attr = NULL;
-        const CONF_VALUE *val = NULL;
 
         if ((options & (NOCERTS | NOKEYS)) == (NOCERTS | NOKEYS)) {
             BIO_printf(bio_err, "Nothing to export due to -noout or -nocerts and -nokeys\n");
@@ -677,25 +679,8 @@ int pkcs12_main(int argc, char **argv)
         if (!twopass)
             OPENSSL_strlcpy(macpass, pass, sizeof(macpass));
 
-        /* Load the config file */
-        if ((conf = app_load_config(default_config_file)) == NULL)
-            goto export_end;
-        if (!app_load_modules(conf))
-            goto export_end;
-        /* Find the cert bag section */
-        cb_attr = app_conf_try_string(conf, "pkcs12", "certBagAttr");
-        if (cb_attr != NULL) {
-            if ((cb_sk = NCONF_get_section(conf, cb_attr)) != NULL) {
-                for (i = 0; i < sk_CONF_VALUE_num(cb_sk); i++) {
-                    val = sk_CONF_VALUE_value(cb_sk, i);
-                    if (strcmp(val->name, "jdkTrustedKeyUsage") == 0) {
-                        obj = OBJ_txt2obj(val->value, 0);
-                        break;
-                    }
-                }
-            } else {
-                ERR_clear_error();
-            }
+        if (jdktrust != NULL) {
+            obj = OBJ_txt2obj(jdktrust, 0);
         }
 
         p12 = PKCS12_create_ex2(cpass, name, key, ee_cert, certs,
@@ -738,7 +723,6 @@ int pkcs12_main(int argc, char **argv)
         OSSL_STACK_OF_X509_free(certs);
         OSSL_STACK_OF_X509_free(untrusted_certs);
         X509_free(ee_cert);
-        NCONF_free(conf);
         ASN1_OBJECT_free(obj);
         ERR_print_errors(bio_err);
         goto end;
@@ -917,7 +901,11 @@ int dump_certs_keys_p12(BIO *out, const PKCS12 *p12, const char *pass,
         } else if (bagnid == NID_pkcs7_encrypted) {
             if (options & INFO) {
                 BIO_printf(bio_err, "PKCS7 Encrypted data: ");
-                alg_print(p7->d.encrypted->enc_data->algorithm);
+                if (p7->d.encrypted == NULL) {
+                    BIO_printf(bio_err, "<no data>\n");
+                } else {
+                    alg_print(p7->d.encrypted->enc_data->algorithm);
+                }
             }
             bags = PKCS12_unpack_p7encdata(p7, pass, passlen);
         } else {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -138,7 +138,7 @@ struct record_functions_st
 
     /* Write related functions */
 
-    size_t (*get_max_records)(OSSL_RECORD_LAYER *rl, int type, size_t len,
+    size_t (*get_max_records)(OSSL_RECORD_LAYER *rl, uint8_t type, size_t len,
                               size_t maxfrag, size_t *preffrag);
 
     /* Return 1 for success or 0 for error */
@@ -167,13 +167,13 @@ struct record_functions_st
                                     size_t *wpinited);
 
     /* Get the actual record type to be used for a given template */
-    unsigned int (*get_record_type)(OSSL_RECORD_LAYER *rl,
-                                    OSSL_RECORD_TEMPLATE *template);
+    uint8_t (*get_record_type)(OSSL_RECORD_LAYER *rl,
+                               OSSL_RECORD_TEMPLATE *template);
 
     /* Write the record header data to the WPACKET */
     int (*prepare_record_header)(OSSL_RECORD_LAYER *rl, WPACKET *thispkt,
                                  OSSL_RECORD_TEMPLATE *templ,
-                                 unsigned int rectype,
+                                 uint8_t rectype,
                                  unsigned char **recdata);
 
     int (*add_record_padding)(OSSL_RECORD_LAYER *rl,
@@ -335,8 +335,6 @@ struct ossl_record_layer_st
     /* TLSv1.3 fields */
     /* static IV */
     unsigned char iv[EVP_MAX_IV_LENGTH];
-    /* static read IV */
-    unsigned char read_iv[EVP_MAX_IV_LENGTH];
     int allow_plain_alerts;
 
     /* TLS "any" fields */
@@ -346,8 +344,8 @@ struct ossl_record_layer_st
     size_t taglen;
 
     /* DTLS received handshake records (processed and unprocessed) */
-    record_pqueue unprocessed_rcds;
-    record_pqueue processed_rcds;
+    struct pqueue_st *unprocessed_rcds;
+    struct pqueue_st *processed_rcds;
 
     /* records being received in the current epoch */
     DTLS_BITMAP bitmap;
@@ -369,7 +367,7 @@ struct ossl_record_layer_st
     size_t max_pipelines;
 
     /* Function pointers for version specific functions */
-    struct record_functions_st *funcs;
+    const struct record_functions_st *funcs;
 };
 
 typedef struct dtls_rlayer_record_data_st {
@@ -379,12 +377,12 @@ typedef struct dtls_rlayer_record_data_st {
     TLS_RL_RECORD rrec;
 } DTLS_RLAYER_RECORD_DATA;
 
-extern struct record_functions_st ssl_3_0_funcs;
-extern struct record_functions_st tls_1_funcs;
-extern struct record_functions_st tls_1_3_funcs;
-extern struct record_functions_st tls_any_funcs;
-extern struct record_functions_st dtls_1_funcs;
-extern struct record_functions_st dtls_any_funcs;
+extern const struct record_functions_st ssl_3_0_funcs;
+extern const struct record_functions_st tls_1_funcs;
+extern const struct record_functions_st tls_1_3_funcs;
+extern const struct record_functions_st tls_any_funcs;
+extern const struct record_functions_st dtls_1_funcs;
+extern const struct record_functions_st dtls_any_funcs;
 
 void ossl_rlayer_fatal(OSSL_RECORD_LAYER *rl, int al, int reason,
                        const char *fmt, ...);
@@ -397,7 +395,9 @@ void ossl_rlayer_fatal(OSSL_RECORD_LAYER *rl, int al, int reason,
 
 #define RLAYER_USE_EXPLICIT_IV(rl) ((rl)->version == TLS1_1_VERSION \
                                     || (rl)->version == TLS1_2_VERSION \
-                                    || (rl)->isdtls)
+                                    || (rl)->version == DTLS1_BAD_VER \
+                                    || (rl)->version == DTLS1_VERSION \
+                                    || (rl)->version == DTLS1_2_VERSION)
 
 void ossl_tls_rl_record_set_seq_num(TLS_RL_RECORD *r,
                                     const unsigned char *seq_num);
@@ -419,7 +419,7 @@ int dtls_get_more_records(OSSL_RECORD_LAYER *rl);
 int dtls_prepare_record_header(OSSL_RECORD_LAYER *rl,
                                WPACKET *thispkt,
                                OSSL_RECORD_TEMPLATE *templ,
-                               unsigned int rectype,
+                               uint8_t rectype,
                                unsigned char **recdata);
 int dtls_post_encryption_processing(OSSL_RECORD_LAYER *rl,
                                     size_t mac_size,
@@ -436,14 +436,10 @@ int tls13_common_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec);
 
 int
 tls_int_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
-                         int role, int direction, int level, unsigned char *key,
-                         size_t keylen, unsigned char *iv, size_t ivlen,
-                         unsigned char *mackey, size_t mackeylen,
+                         int role, int direction, int level,
                          const EVP_CIPHER *ciph, size_t taglen,
-                         int mactype,
                          const EVP_MD *md, COMP_METHOD *comp, BIO *prev,
                          BIO *transport, BIO *next,
-                         BIO_ADDR *local, BIO_ADDR *peer,
                          const OSSL_PARAM *settings, const OSSL_PARAM *options,
                          const OSSL_DISPATCH *fns, void *cbarg,
                          OSSL_RECORD_LAYER **retrl);
@@ -451,7 +447,7 @@ int tls_free(OSSL_RECORD_LAYER *rl);
 int tls_unprocessed_read_pending(OSSL_RECORD_LAYER *rl);
 int tls_processed_read_pending(OSSL_RECORD_LAYER *rl);
 size_t tls_app_data_pending(OSSL_RECORD_LAYER *rl);
-size_t tls_get_max_records(OSSL_RECORD_LAYER *rl, int type, size_t len,
+size_t tls_get_max_records(OSSL_RECORD_LAYER *rl, uint8_t type, size_t len,
                            size_t maxfrag, size_t *preffrag);
 int tls_write_records(OSSL_RECORD_LAYER *rl, OSSL_RECORD_TEMPLATE *templates,
                       size_t numtempl);
@@ -459,7 +455,7 @@ int tls_retry_write_records(OSSL_RECORD_LAYER *rl);
 int tls_get_alert_code(OSSL_RECORD_LAYER *rl);
 int tls_set1_bio(OSSL_RECORD_LAYER *rl, BIO *bio);
 int tls_read_record(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
-                    int *type, const unsigned char **data, size_t *datalen,
+                    uint8_t *type, const unsigned char **data, size_t *datalen,
                     uint16_t *epoch, unsigned char *seq_num);
 int tls_release_record(OSSL_RECORD_LAYER *rl, void *rechandle, size_t length);
 int tls_default_set_protocol_version(OSSL_RECORD_LAYER *rl, int version);
@@ -480,9 +476,10 @@ int tls_write_records_multiblock(OSSL_RECORD_LAYER *rl,
                                  OSSL_RECORD_TEMPLATE *templates,
                                  size_t numtempl);
 
-size_t tls_get_max_records_default(OSSL_RECORD_LAYER *rl, int type, size_t len,
+size_t tls_get_max_records_default(OSSL_RECORD_LAYER *rl, uint8_t type,
+                                   size_t len,
                                    size_t maxfrag, size_t *preffrag);
-size_t tls_get_max_records_multiblock(OSSL_RECORD_LAYER *rl, int type,
+size_t tls_get_max_records_multiblock(OSSL_RECORD_LAYER *rl, uint8_t type,
                                       size_t len, size_t maxfrag,
                                       size_t *preffrag);
 int tls_allocate_write_buffers_default(OSSL_RECORD_LAYER *rl,
@@ -508,7 +505,7 @@ int tls1_initialise_write_packets(OSSL_RECORD_LAYER *rl,
 int tls_prepare_record_header_default(OSSL_RECORD_LAYER *rl,
                                       WPACKET *thispkt,
                                       OSSL_RECORD_TEMPLATE *templ,
-                                      unsigned int rectype,
+                                      uint8_t rectype,
                                       unsigned char **recdata);
 int tls_prepare_for_encryption_default(OSSL_RECORD_LAYER *rl,
                                        size_t mac_size,

@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -34,8 +34,8 @@ static int test_basic(void)
     if (!TEST_ptr(cctx))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, cert, privkey, 0,
-                                             &qtserv, &cssl, NULL)))
+    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, NULL, cert, privkey, 0,
+                                             &qtserv, &cssl, NULL, NULL)))
         goto err;
 
     if (!TEST_true(qtest_create_quic_connection(qtserv, cssl)))
@@ -104,8 +104,8 @@ static int test_unknown_frame(void)
     if (!TEST_ptr(cctx))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, cert, privkey, 0,
-                                             &qtserv, &cssl, &fault)))
+    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, NULL, cert, privkey, 0,
+                                             &qtserv, &cssl, &fault, NULL)))
         goto err;
 
     if (!TEST_true(qtest_create_quic_connection(qtserv, cssl)))
@@ -161,36 +161,46 @@ static int test_unknown_frame(void)
  * Test that a server that fails to provide transport params cannot be
  * connected to.
  */
-static int drop_transport_params_cb(QTEST_FAULT *fault,
+static int drop_extensions_cb(QTEST_FAULT *fault,
                                     QTEST_ENCRYPTED_EXTENSIONS *ee,
                                     size_t eelen, void *encextcbarg)
 {
-    if (!qtest_fault_delete_extension(fault,
-                                      TLSEXT_TYPE_quic_transport_parameters,
-                                      ee->extensions, &ee->extensionslen))
+    int *ext = (int *)encextcbarg;
+
+    if (!qtest_fault_delete_extension(fault, *ext, ee->extensions,
+                                      &ee->extensionslen, NULL))
         return 0;
 
     return 1;
 }
 
-static int test_no_transport_params(void)
+static int test_drop_extensions(int idx)
 {
     int testresult = 0;
     SSL_CTX *cctx = SSL_CTX_new(OSSL_QUIC_client_method());
     QUIC_TSERVER *qtserv = NULL;
     SSL *cssl = NULL;
     QTEST_FAULT *fault = NULL;
+    int ext, err;
 
     if (!TEST_ptr(cctx))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, cert, privkey, 0,
-                                             &qtserv, &cssl, &fault)))
+    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, NULL, cert, privkey, 0,
+                                             &qtserv, &cssl, &fault, NULL)))
         goto err;
 
+    if (idx == 0) {
+        ext = TLSEXT_TYPE_quic_transport_parameters;
+        err = OSSL_QUIC_ERR_CRYPTO_MISSING_EXT;
+    } else {
+        ext = TLSEXT_TYPE_application_layer_protocol_negotiation;
+        err = OSSL_QUIC_ERR_CRYPTO_NO_APP_PROTO;
+    }
+
     if (!TEST_true(qtest_fault_set_hand_enc_ext_listener(fault,
-                                                         drop_transport_params_cb,
-                                                         NULL)))
+                                                         drop_extensions_cb,
+                                                         &ext)))
         goto err;
 
     /*
@@ -200,7 +210,7 @@ static int test_no_transport_params(void)
     if (!TEST_false(qtest_create_quic_connection(qtserv, cssl)))
         goto err;
 
-    if (!TEST_true(qtest_check_server_protocol_err(qtserv)))
+    if (!TEST_true(qtest_check_server_transport_err(qtserv, err)))
         goto err;
 
     testresult = 1;
@@ -263,9 +273,9 @@ static int test_corrupted_data(int idx)
     if (!TEST_ptr(cctx))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, cert, privkey,
+    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, NULL, cert, privkey,
                                              QTEST_FLAG_FAKE_TIME, &qtserv,
-                                             &cssl, &fault)))
+                                             &cssl, &fault, NULL)))
         goto err;
 
     if (idx == 0) {
@@ -383,7 +393,7 @@ int setup_tests(void)
 
     ADD_TEST(test_basic);
     ADD_TEST(test_unknown_frame);
-    ADD_TEST(test_no_transport_params);
+    ADD_ALL_TESTS(test_drop_extensions, 2);
     ADD_ALL_TESTS(test_corrupted_data, 2);
 
     return 1;

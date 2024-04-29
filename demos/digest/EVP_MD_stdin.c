@@ -1,5 +1,5 @@
 /*-
- * Copyright 2019-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -31,17 +31,17 @@
  * a BIO created to read from stdin
  */
 
-int demonstrate_digest(BIO *input)
+static int demonstrate_digest(BIO *input)
 {
     OSSL_LIB_CTX *library_context = NULL;
     int ret = 0;
-    const char * option_properties = NULL;
+    const char *option_properties = NULL;
     EVP_MD *message_digest = NULL;
     EVP_MD_CTX *digest_context = NULL;
     unsigned int digest_length;
     unsigned char *digest_value = NULL;
     unsigned char buffer[512];
-    int ii;
+    unsigned int ii;
 
     library_context = OSSL_LIB_CTX_new();
     if (library_context == NULL) {

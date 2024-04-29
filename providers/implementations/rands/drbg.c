@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -31,7 +31,7 @@
  *
  * The OpenSSL model is to have new and free functions, and that new
  * does all initialization.  That is not the NIST model, which has
- * instantiation and un-instantiate, and re-use within a new/free
+ * instantiation and un-instantiate, and reuse within a new/free
  * lifecycle.  (No doubt this comes from the desire to support hardware
  * DRBG, where allocation of resources on something like an HSM is
  * a much bigger deal than just re-setting an allocated resource.)
@@ -336,7 +336,7 @@ static size_t prov_drbg_get_nonce(PROV_DRBG *drbg, unsigned char **pout,
     memset(&data, 0, sizeof(data));
     data.drbg = drbg;
     if (!CRYPTO_atomic_add(&dngbl->rand_nonce_count, 1, &data.count,
-                      dngbl->rand_nonce_lock))
+                           dngbl->rand_nonce_lock))
         return 0;
     return ossl_prov_get_nonce(drbg->provctx, pout, min_len, max_len,
                                &data, sizeof(data));
@@ -788,6 +788,7 @@ int ossl_drbg_enable_locking(void *vctx)
 PROV_DRBG *ossl_rand_drbg_new
     (void *provctx, void *parent, const OSSL_DISPATCH *p_dispatch,
      int (*dnew)(PROV_DRBG *ctx),
+     void (*dfree)(void *vctx),
      int (*instantiate)(PROV_DRBG *drbg,
                         const unsigned char *entropy, size_t entropylen,
                         const unsigned char *nonce, size_t noncelen,
@@ -865,7 +866,7 @@ PROV_DRBG *ossl_rand_drbg_new
     return drbg;
 
  err:
-    ossl_rand_drbg_free(drbg);
+    dfree(drbg);
     return NULL;
 }
 

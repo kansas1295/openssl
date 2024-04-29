@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -12,9 +12,9 @@
 
 # include <openssl/ssl.h>
 # include "internal/quic_stream.h"
+# include "internal/quic_predef.h"
 
-
-typedef struct quic_tls_st QUIC_TLS;
+# ifndef OPENSSL_NO_QUIC
 
 typedef struct quic_tls_args_st {
     /*
@@ -94,4 +94,15 @@ int ossl_quic_tls_tick(QUIC_TLS *qtls);
 int ossl_quic_tls_set_transport_params(QUIC_TLS *qtls,
                                        const unsigned char *transport_params,
                                        size_t transport_params_len);
+
+int ossl_quic_tls_get_error(QUIC_TLS *qtls,
+                            uint64_t *error_code,
+                            const char **error_msg,
+                            ERR_STATE **error_state);
+
+int ossl_quic_tls_is_cert_request(QUIC_TLS *qtls);
+int ossl_quic_tls_has_bad_max_early_data(QUIC_TLS *qtls);
+
+# endif
+
 #endif

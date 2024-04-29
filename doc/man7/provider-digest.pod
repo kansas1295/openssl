@@ -198,8 +198,7 @@ This digest method can only handle one block of input.
 
 =item B<EVP_MD_FLAG_XOF>
 
-This digest method is an extensible-output function (XOF) and supports
-setting the B<OSSL_DIGEST_PARAM_XOFLEN> parameter.
+This digest method is an extensible-output function (XOF).
 
 =item B<EVP_MD_FLAG_DIGALGID_NULL>
 
@@ -277,7 +276,7 @@ The provider DIGEST interface was introduced in OpenSSL 3.0.
 
 =head1 COPYRIGHT
 
-Copyright 2019-2021 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the Apache License 2.0 (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

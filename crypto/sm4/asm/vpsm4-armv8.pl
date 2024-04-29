@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2020-2022 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2020-2024 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -569,11 +569,11 @@ _vpsm4_consts:
 	.long 0xA0A7AEB5, 0xBCC3CAD1, 0xD8DFE6ED, 0xF4FB0209
 	.long 0x10171E25, 0x2C333A41, 0x484F565D, 0x646B7279
 .Lfk:
-	.dword 0x56aa3350a3b1bac6,0xb27022dc677d9197
+	.quad 0x56aa3350a3b1bac6,0xb27022dc677d9197
 .Lshuffles:
-	.dword 0x0B0A090807060504,0x030201000F0E0D0C
+	.quad 0x0B0A090807060504,0x030201000F0E0D0C
 .Lxts_magic:
-	.dword 0x0101010101010187,0x0101010101010101
+	.quad 0x0101010101010187,0x0101010101010101
 
 .size	_vpsm4_consts,.-_vpsm4_consts
 ___
@@ -937,7 +937,7 @@ ___
 $code.=<<___;
 	ld1	{$ivec1.4s},[$ivp]
 	ld1	{@datax[0].4s,@datax[1].4s,@datax[2].4s,@datax[3].4s},[$inp],#64
-	// note ivec1 and vtmpx[3] are resuing the same register
+	// note ivec1 and vtmpx[3] are reusing the same register
 	// care needs to be taken to avoid conflict
 	eor	@vtmp[0].16b,@vtmp[0].16b,$ivec1.16b
 	ld1	{@vtmpx[0].4s,@vtmpx[1].4s,@vtmpx[2].4s,@vtmpx[3].4s},[$inp],#64
@@ -1495,7 +1495,7 @@ $code.=<<___;
 	mov @tweak[1].16b,@tweak[0].16b
 ___
 	&rev32_armeb(@tweak[1],@tweak[1]);
-	&compute_tweak_vec(@tweak[1],@tweak[2]);
+	&compute_tweak_vec(@tweak[1],@tweak[2],$std);
 $code.=<<___;
 	b .check_dec${std}
 
@@ -1505,12 +1505,12 @@ $code.=<<___;
 .check_dec${std}:
 	// encryption:1 decryption:0
 	cmp $enc,1
-	b.eq .prcess_last_2blks${std}
+	b.eq .process_last_2blks${std}
 	mov @vtmp[0].16B,@tweak[1].16b
 	mov @tweak[1].16B,@tweak[2].16b
 	mov @tweak[2].16B,@vtmp[0].16b
 
-.prcess_last_2blks${std}:
+.process_last_2blks${std}:
 ___
 	&rev32_armeb(@tweak[1],@tweak[1]);
 	&rev32_armeb(@tweak[2],@tweak[2]);

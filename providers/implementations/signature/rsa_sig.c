@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -114,8 +114,14 @@ typedef struct {
 
 static size_t rsa_get_md_size(const PROV_RSA_CTX *prsactx)
 {
-    if (prsactx->md != NULL)
-        return EVP_MD_get_size(prsactx->md);
+    int md_size;
+
+    if (prsactx->md != NULL) {
+        md_size = EVP_MD_get_size(prsactx->md);
+        if (md_size <= 0)
+            return 0;
+        return md_size;
+    }
     return 0;
 }
 
@@ -1006,6 +1012,7 @@ static void *rsa_dupctx(void *vprsactx)
     *dstctx = *srcctx;
     dstctx->rsa = NULL;
     dstctx->md = NULL;
+    dstctx->mgf1_md = NULL;
     dstctx->mdctx = NULL;
     dstctx->tbuf = NULL;
     dstctx->propq = NULL;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -147,6 +147,7 @@ int tls_setup_write_buffer(OSSL_RECORD_LAYER *rl, size_t numwpipes,
     TLS_BUFFER *wb;
     size_t currpipe;
     size_t defltlen = 0;
+    size_t contenttypelen = 0;
 
     if (firstlen == 0 || (numwpipes > 1 && nextlen == 0)) {
         if (rl->isdtls)
@@ -154,21 +155,26 @@ int tls_setup_write_buffer(OSSL_RECORD_LAYER *rl, size_t numwpipes,
         else
             headerlen = SSL3_RT_HEADER_LENGTH;
 
+        /* TLSv1.3 adds an extra content type byte after payload data */
+        if (rl->version == TLS1_3_VERSION)
+            contenttypelen = 1;
+
 #if defined(SSL3_ALIGN_PAYLOAD) && SSL3_ALIGN_PAYLOAD != 0
         align = SSL3_ALIGN_PAYLOAD - 1;
 #endif
 
-        defltlen = rl->max_frag_len + SSL3_RT_SEND_MAX_ENCRYPTED_OVERHEAD
-                   + headerlen + align + rl->eivlen;
+        defltlen = align + headerlen + rl->eivlen + rl->max_frag_len
+                   + contenttypelen + SSL3_RT_SEND_MAX_ENCRYPTED_OVERHEAD;
 #ifndef OPENSSL_NO_COMP
         if (tls_allow_compression(rl))
             defltlen += SSL3_RT_MAX_COMPRESSED_OVERHEAD;
 #endif
         /*
          * We don't need to add eivlen here since empty fragments only occur
-         * when we don't have an explicit IV
+         * when we don't have an explicit IV. The contenttype byte will also
+         * always be 0 in these protocol versions
          */
-        if (!(rl->options & SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS))
+        if ((rl->options & SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS) == 0)
             defltlen += headerlen + align + SSL3_RT_SEND_MAX_ENCRYPTED_OVERHEAD;
     }
 
@@ -910,11 +916,17 @@ int tls_get_more_records(OSSL_RECORD_LAYER *rl)
         }
 
         /*
-         * Check if the received packet overflows the current
-         * Max Fragment Length setting.
-         * Note: rl->max_frag_len > 0 and KTLS are mutually exclusive.
+         * Record overflow checking (e.g. checking if
+         * thisrr->length > SSL3_RT_MAX_PLAIN_LENGTH) is the responsibility of
+         * the post_process_record() function above. However we check here if
+         * the received packet overflows the current Max Fragment Length setting
+         * if there is one.
+         * Note: rl->max_frag_len != SSL3_RT_MAX_PLAIN_LENGTH and KTLS are
+         * mutually exclusive. Also note that with KTLS thisrr->length can
+         * be > SSL3_RT_MAX_PLAIN_LENGTH (and rl->max_frag_len must be ignored)
          */
-        if (thisrr->length > rl->max_frag_len) {
+        if (rl->max_frag_len != SSL3_RT_MAX_PLAIN_LENGTH
+                && thisrr->length > rl->max_frag_len) {
             RLAYERfatal(rl, SSL_AD_RECORD_OVERFLOW, SSL_R_DATA_LENGTH_TOO_LONG);
             goto end;
         }
@@ -1088,7 +1100,7 @@ int tls13_common_post_process_record(OSSL_RECORD_LAYER *rl, TLS_RL_RECORD *rec)
 }
 
 int tls_read_record(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
-                    int *type, const unsigned char **data, size_t *datalen,
+                    uint8_t *type, const unsigned char **data, size_t *datalen,
                     uint16_t *epoch, unsigned char *seq_num)
 {
     TLS_RL_RECORD *rec;
@@ -1220,14 +1232,10 @@ int tls_set_options(OSSL_RECORD_LAYER *rl, const OSSL_PARAM *options)
 
 int
 tls_int_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
-                         int role, int direction, int level, unsigned char *key,
-                         size_t keylen, unsigned char *iv, size_t ivlen,
-                         unsigned char *mackey, size_t mackeylen,
+                         int role, int direction, int level,
                          const EVP_CIPHER *ciph, size_t taglen,
-                         int mactype,
                          const EVP_MD *md, COMP_METHOD *comp, BIO *prev,
-                         BIO *transport, BIO *next, BIO_ADDR *local,
-                         BIO_ADDR *peer, const OSSL_PARAM *settings,
+                         BIO *transport, BIO *next, const OSSL_PARAM *settings,
                          const OSSL_PARAM *options,
                          const OSSL_DISPATCH *fns, void *cbarg,
                          OSSL_RECORD_LAYER **retrl)
@@ -1375,9 +1383,8 @@ tls_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
     int ret;
 
     ret = tls_int_new_record_layer(libctx, propq, vers, role, direction, level,
-                                   key, keylen, iv, ivlen, mackey, mackeylen,
-                                   ciph, taglen, mactype, md, comp, prev,
-                                   transport, next, local, peer, settings,
+                                   ciph, taglen, md, comp, prev,
+                                   transport, next, settings,
                                    options, fns, cbarg, retrl);
 
     if (ret != OSSL_RECORD_RETURN_SUCCESS)
@@ -1411,7 +1418,7 @@ tls_new_record_layer(OSSL_LIB_CTX *libctx, const char *propq, int vers,
 
  err:
     if (ret != OSSL_RECORD_RETURN_SUCCESS) {
-        OPENSSL_free(*retrl);
+        tls_int_free(*retrl);
         *retrl = NULL;
     }
     return ret;
@@ -1487,7 +1494,8 @@ size_t tls_app_data_pending(OSSL_RECORD_LAYER *rl)
     return num;
 }
 
-size_t tls_get_max_records_default(OSSL_RECORD_LAYER *rl, int type, size_t len,
+size_t tls_get_max_records_default(OSSL_RECORD_LAYER *rl, uint8_t type,
+                                   size_t len,
                                    size_t maxfrag, size_t *preffrag)
 {
     /*
@@ -1511,7 +1519,7 @@ size_t tls_get_max_records_default(OSSL_RECORD_LAYER *rl, int type, size_t len,
     return 1;
 }
 
-size_t tls_get_max_records(OSSL_RECORD_LAYER *rl, int type, size_t len,
+size_t tls_get_max_records(OSSL_RECORD_LAYER *rl, uint8_t type, size_t len,
                            size_t maxfrag, size_t *preffrag)
 {
     return rl->funcs->get_max_records(rl, type, len, maxfrag, preffrag);
@@ -1574,7 +1582,7 @@ int tls_initialise_write_packets_default(OSSL_RECORD_LAYER *rl,
 int tls_prepare_record_header_default(OSSL_RECORD_LAYER *rl,
                                       WPACKET *thispkt,
                                       OSSL_RECORD_TEMPLATE *templ,
-                                      unsigned int rectype,
+                                      uint8_t rectype,
                                       unsigned char **recdata)
 {
     size_t maxcomplen;
@@ -1755,7 +1763,7 @@ int tls_write_records_default(OSSL_RECORD_LAYER *rl,
     memset(wr, 0, sizeof(wr));
     for (j = 0; j < numtempl + prefix; j++) {
         unsigned char *compressdata = NULL;
-        unsigned int rectype;
+        uint8_t rectype;
 
         thispkt = &pkt[j];
         thiswr = &wr[j];
@@ -1906,10 +1914,13 @@ int tls_retry_write_records(OSSL_RECORD_LAYER *rl)
                 else
                     ret = OSSL_RECORD_RETURN_SUCCESS;
             } else {
-                if (BIO_should_retry(rl->bio))
+                if (BIO_should_retry(rl->bio)) {
                     ret = OSSL_RECORD_RETURN_RETRY;
-                else
+                } else {
+                    ERR_raise_data(ERR_LIB_SYS, get_last_sys_error(),
+                                   "tls_retry_write_records failure");
                     ret = OSSL_RECORD_RETURN_FATAL;
+                }
             }
         } else {
             RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, SSL_R_BIO_NOT_SET);

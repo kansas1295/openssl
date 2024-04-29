@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -73,6 +73,7 @@ static ossl_unused ossl_inline int ossl_quic_pn_valid(QUIC_PN pn)
 
 /* QUIC connection ID representation. */
 #  define QUIC_MAX_CONN_ID_LEN   20
+#  define QUIC_MIN_ODCID_LEN     8   /* RFC 9000 s. 7.2 */
 
 typedef struct quic_conn_id_st {
     unsigned char id_len, id[QUIC_MAX_CONN_ID_LEN];
@@ -85,6 +86,13 @@ static ossl_unused ossl_inline int ossl_quic_conn_id_eq(const QUIC_CONN_ID *a,
         return 0;
     return memcmp(a->id, b->id, a->id_len) == 0;
 }
+
+/*
+ * Generates a random CID of the given length. libctx may be NULL.
+ * Returns 1 on success or 0 on failure.
+ */
+int ossl_quic_gen_rand_conn_id(OSSL_LIB_CTX *libctx, size_t len,
+                               QUIC_CONN_ID *cid);
 
 #  define QUIC_MIN_INITIAL_DGRAM_LEN  1200
 
@@ -99,6 +107,10 @@ static ossl_unused ossl_inline int ossl_quic_conn_id_eq(const QUIC_CONN_ID *a,
 #  define QUIC_DEFAULT_IDLE_TIMEOUT   30000
 
 #  define QUIC_STATELESS_RESET_TOKEN_LEN    16
+
+typedef struct {
+    unsigned char token[QUIC_STATELESS_RESET_TOKEN_LEN];
+} QUIC_STATELESS_RESET_TOKEN;
 
 /*
  * An encoded preferred_addr transport parameter cannot be shorter or longer

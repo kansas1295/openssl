@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2013-2021 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2013-2023 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -29,6 +29,9 @@ cp ../certs/ee-key-3072.pem smrsa2.pem
 gen smrsa2.pem "/CN=Test SMIME EE RSA #2" usr_rsa_cert >>smrsa2.pem
 cp ../certs/ee-key-4096.pem smrsa3.pem
 gen smrsa3.pem "/CN=Test SMIME EE RSA #3" usr_rsa_cert >>smrsa3.pem
+
+$OPENSSL x509 -in smrsa3.pem > smrsa3-cert.pem
+$OPENSSL pkey -in smrsa3.pem > smrsa3-key.pem
 
 # Create DSA certificates with respective extensions
 

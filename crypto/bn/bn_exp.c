@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -241,6 +241,14 @@ int BN_mod_exp_recp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
                                  * buffer. */
     wstart = bits - 1;          /* The top bit of the window */
     wend = 0;                   /* The bottom bit of the window */
+
+    if (r == p) {
+        BIGNUM *p_dup = BN_CTX_get(ctx);
+
+        if (p_dup == NULL || BN_copy(p_dup, p) == NULL)
+            goto err;
+        p = p_dup;
+    }
 
     if (!BN_one(r))
         goto err;
@@ -1317,6 +1325,11 @@ int BN_mod_exp_simple(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
         return 0;
     }
 
+    if (r == m) {
+        ERR_raise(ERR_LIB_BN, ERR_R_PASSED_INVALID_ARGUMENT);
+        return 0;
+    }
+
     bits = BN_num_bits(p);
     if (bits == 0) {
         /* x**0 mod 1, or x**0 mod -1 is still zero. */
@@ -1360,6 +1373,14 @@ int BN_mod_exp_simple(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
                                  * buffer. */
     wstart = bits - 1;          /* The top bit of the window */
     wend = 0;                   /* The bottom bit of the window */
+
+    if (r == p) {
+        BIGNUM *p_dup = BN_CTX_get(ctx);
+
+        if (p_dup == NULL || BN_copy(p_dup, p) == NULL)
+            goto err;
+        p = p_dup;
+    }
 
     if (!BN_one(r))
         goto err;

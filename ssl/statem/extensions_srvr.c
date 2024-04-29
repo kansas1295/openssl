@@ -573,6 +573,21 @@ int tls_parse_ctos_psk_kex_modes(SSL_CONNECTION *s, PACKET *pkt,
                 && (s->options & SSL_OP_ALLOW_NO_DHE_KEX) != 0)
             s->ext.psk_kex_mode |= TLSEXT_KEX_MODE_FLAG_KE;
     }
+
+    if (((s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE) != 0)
+            && (s->options & SSL_OP_PREFER_NO_DHE_KEX) != 0) {
+
+        /*
+         * If NO_DHE is supported and preferred, then we only remember this
+         * mode. DHE PSK will not be used for sure, because in any case where
+         * it would be supported (i.e. if a key share is present), NO_DHE would
+         * be supported as well. As the latter is preferred it would be
+         * chosen. By removing DHE PSK here, we don't have to deal with the
+         * SSL_OP_PREFER_NO_DHE_KEX option in any other place.
+         */
+        s->ext.psk_kex_mode = TLSEXT_KEX_MODE_FLAG_KE;
+    }
+
 #endif
 
     return 1;
@@ -902,7 +917,7 @@ int tls_parse_ctos_cookie(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
     }
 
     /* Act as if this ClientHello came after a HelloRetryRequest */
-    s->hello_retry_request = 1;
+    s->hello_retry_request = SSL_HRR_PENDING;
 
     s->ext.cookieok = 1;
 #endif
@@ -1005,7 +1020,8 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
                        X509 *x, size_t chainidx)
 {
     PACKET identities, binders, binder;
-    size_t binderoffset, hashsize;
+    size_t binderoffset;
+    int hashsize;
     SSL_SESSION *sess = NULL;
     unsigned int id, i, ext = 0;
     const EVP_MD *md = NULL;
@@ -1206,6 +1222,8 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
 
     binderoffset = PACKET_data(pkt) - (const unsigned char *)s->init_buf->data;
     hashsize = EVP_MD_get_size(md);
+    if (hashsize <= 0)
+        goto err;
 
     if (!PACKET_get_length_prefixed_2(pkt, &binders)) {
         SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
@@ -1219,7 +1237,7 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
         }
     }
 
-    if (PACKET_remaining(&binder) != hashsize) {
+    if (PACKET_remaining(&binder) != (size_t)hashsize) {
         SSLfatal(s, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
         goto err;
     }
@@ -1645,10 +1663,13 @@ EXT_RETURN tls_construct_stoc_key_share(SSL_CONNECTION *s, WPACKET *pkt,
         }
         return EXT_RETURN_NOT_SENT;
     }
+
     if (s->hit && (s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE_DHE) == 0) {
         /*
-         * PSK ('hit') and explicitly not doing DHE (if the client sent the
-         * DHE option we always take it); don't send key share.
+         * PSK ('hit') and explicitly not doing DHE. If the client sent the
+         * DHE option, we take it by default, except if non-DHE would be
+         * preferred by config, but this case would have been handled in
+         * tls_parse_ctos_psk_kex_modes().
          */
         return EXT_RETURN_NOT_SENT;
     }

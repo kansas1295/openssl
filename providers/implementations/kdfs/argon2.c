@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -823,12 +823,12 @@ static int blake2b_md(EVP_MD *md, void *out, size_t outlen, const void *in,
     if ((ctx = EVP_MD_CTX_create()) == NULL)
         return 0;
 
-    par[0] = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_XOFLEN, &outlen);
+    par[0] = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_SIZE, &outlen);
     par[1] = OSSL_PARAM_construct_end();
 
     ret = EVP_DigestInit_ex2(ctx, md, par) == 1
         && EVP_DigestUpdate(ctx, in, inlen) == 1
-        && EVP_DigestFinalXOF(ctx, out, outlen) == 1;
+        && EVP_DigestFinal_ex(ctx, out, NULL) == 1;
 
     EVP_MD_CTX_free(ctx);
     return ret;
@@ -868,14 +868,14 @@ static int blake2b_long(EVP_MD *md, EVP_MAC *mac, unsigned char *out,
         return 0;
 
     outlen_md = (outlen <= BLAKE2B_OUTBYTES) ? outlen : BLAKE2B_OUTBYTES;
-    par[0] = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_XOFLEN, &outlen_md);
+    par[0] = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_SIZE, &outlen_md);
     par[1] = OSSL_PARAM_construct_end();
 
     ret = EVP_DigestInit_ex2(ctx, md, par) == 1
         && EVP_DigestUpdate(ctx, outlen_bytes, sizeof(outlen_bytes)) == 1
         && EVP_DigestUpdate(ctx, in, inlen) == 1
-        && EVP_DigestFinalXOF(ctx, (outlen > BLAKE2B_OUTBYTES) ? outbuf : out,
-                outlen_md) == 1;
+        && EVP_DigestFinal_ex(ctx, (outlen > BLAKE2B_OUTBYTES) ? outbuf : out,
+                              NULL) == 1;
 
     if (ret == 0)
         goto fail;
@@ -1185,8 +1185,7 @@ static int kdf_argon2_ctx_set_lanes(KDF_ARGON2 *ctx, uint32_t lanes)
 
 static int kdf_argon2_ctx_set_t_cost(KDF_ARGON2 *ctx, uint32_t t_cost)
 {
-    /* ARGON2_MAX_MEMORY == max m_cost value, skip check, enforce type */
-    ossl_static_assert_type_eq(uint32_t, t_cost);
+    /* ARGON2_MAX_MEMORY == max m_cost value, so skip check  */
 
     if (t_cost < ARGON2_MIN_TIME) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_INVALID_ITERATION_COUNT,
@@ -1200,8 +1199,7 @@ static int kdf_argon2_ctx_set_t_cost(KDF_ARGON2 *ctx, uint32_t t_cost)
 
 static int kdf_argon2_ctx_set_m_cost(KDF_ARGON2 *ctx, uint32_t m_cost)
 {
-    /* ARGON2_MAX_MEMORY == max m_cost value, skip check, enforce type */
-    ossl_static_assert_type_eq(uint32_t, m_cost);
+    /* ARGON2_MAX_MEMORY == max m_cost value, so skip check */
 
     if (m_cost < ARGON2_MIN_MEMORY) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_INVALID_MEMORY_SIZE, "min: %u",
@@ -1218,11 +1216,8 @@ static int kdf_argon2_ctx_set_out_length(KDF_ARGON2 *ctx, uint32_t outlen)
     /*
      * ARGON2_MAX_OUT_LENGTH == max outlen value, so upper bounds checks
      * are always satisfied; to suppress compiler if statement tautology
-     * warnings, these checks are skipped; however, to ensure that these
-     * limits are met and implementation conforming to Argon2 RFC, we need
-     * to fix the type
+     * warnings, these checks are skipped.
      */
-    ossl_static_assert_type_eq(uint32_t, outlen);
 
     if (outlen < ARGON2_MIN_OUT_LENGTH) {
         ERR_raise_data(ERR_LIB_PROV, PROV_R_INVALID_OUTPUT_LENGTH, "min: %u",

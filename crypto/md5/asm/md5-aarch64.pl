@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2021-2022 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2021-2023 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -28,10 +28,13 @@ open OUT,"| \"$^X\" $xlate $flavour \"$output\""
 *STDOUT=*OUT;
 
 $code .= <<EOF;
+#include "arm_arch.h"
+
 .text
 .globl  ossl_md5_block_asm_data_order
 .type   ossl_md5_block_asm_data_order,\@function
 ossl_md5_block_asm_data_order:
+        AARCH64_VALID_CALL_TARGET
         // Save all callee-saved registers
         stp     x19,x20,[sp,#-80]!
         stp     x21,x22,[sp,#16]

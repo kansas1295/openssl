@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -32,5 +32,9 @@ int ossl_decoder_ctx_add_decoder_inst(OSSL_DECODER_CTX *ctx,
 int ossl_decoder_get_number(const OSSL_DECODER *encoder);
 int ossl_decoder_store_cache_flush(OSSL_LIB_CTX *libctx);
 int ossl_decoder_store_remove_all_provided(const OSSL_PROVIDER *prov);
+
+void *ossl_decoder_cache_new(OSSL_LIB_CTX *ctx);
+void ossl_decoder_cache_free(void *vcache);
+int ossl_decoder_cache_flush(OSSL_LIB_CTX *libctx);
 
 #endif

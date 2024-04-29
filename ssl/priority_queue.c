@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -265,8 +265,14 @@ void *ossl_pqueue_remove(OSSL_PQUEUE *pq, size_t elem)
 
     ASSERT_USED(pq, n);
 
-    if (n == pq->htop - 1)
+    if (n == pq->htop - 1) {
+        pq->elements[elem].posn = pq->freelist;
+        pq->freelist = elem;
+#ifndef NDEBUG
+        pq->elements[elem].used = 0;
+#endif
         return pq->heap[--pq->htop].data;
+    }
     if (n > 0)
         pqueue_force_bottom(pq, n);
     return ossl_pqueue_pop(pq);

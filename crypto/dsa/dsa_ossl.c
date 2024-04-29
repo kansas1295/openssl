@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -462,7 +462,6 @@ static int dsa_do_verify(const unsigned char *dgst, int dgst_len,
 static int dsa_init(DSA *dsa)
 {
     dsa->flags |= DSA_FLAG_CACHE_MONT_P;
-    ossl_ffc_params_init(&dsa->params);
     dsa->dirty_cnt++;
     return 1;
 }

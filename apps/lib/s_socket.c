@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -40,12 +40,6 @@ typedef unsigned int u_int;
 # include "apps.h"
 # include "s_apps.h"
 # include "internal/sockets.h"
-
-# if defined(__TANDEM)
-#  if defined(OPENSSL_TANDEM_FLOSS)
-#   include <floss.h(floss_read)>
-#  endif
-# endif
 
 # include <openssl/bio.h>
 # include <openssl/err.h>
@@ -208,7 +202,7 @@ int init_client(int *sock, const char *host, const char *port,
 
         hostname = BIO_ADDR_hostname_string(BIO_ADDRINFO_address(ai), 1);
         if (hostname != NULL) {
-            BIO_printf(bio_out, "Connecting to %s\n", hostname);
+            BIO_printf(bio_err, "Connecting to %s\n", hostname);
             OPENSSL_free(hostname);
         }
         /* Remove any stale errors from previous connection attempts */

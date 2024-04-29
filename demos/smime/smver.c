@@ -1,5 +1,5 @@
 /*
- * Copyright 2007-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2007-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -66,10 +66,9 @@ int main(int argc, char **argv)
         goto err;
     }
 
-    fprintf(stderr, "Verification Successful\n");
+    printf("Verification Successful\n");
 
     ret = EXIT_SUCCESS;
-
  err:
     if (ret != EXIT_SUCCESS) {
         fprintf(stderr, "Error Verifying Data\n");

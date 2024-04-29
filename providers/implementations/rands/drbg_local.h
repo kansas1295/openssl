@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -176,6 +176,7 @@ struct prov_drbg_st {
 PROV_DRBG *ossl_rand_drbg_new
     (void *provctx, void *parent, const OSSL_DISPATCH *parent_dispatch,
      int (*dnew)(PROV_DRBG *ctx),
+     void (*dfree)(void *vctx),
      int (*instantiate)(PROV_DRBG *drbg,
                         const unsigned char *entropy, size_t entropylen,
                         const unsigned char *nonce, size_t noncelen,
@@ -206,7 +207,7 @@ OSSL_FUNC_rand_get_seed_fn ossl_drbg_get_seed;
 OSSL_FUNC_rand_clear_seed_fn ossl_drbg_clear_seed;
 
 /* Verify that an array of numeric values is all zero */
-#define PROV_DRBG_VERYIFY_ZEROIZATION(v)    \
+#define PROV_DRBG_VERIFY_ZEROIZATION(v)     \
     {                                       \
         size_t i;                           \
                                             \

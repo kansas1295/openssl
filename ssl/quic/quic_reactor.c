@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -24,6 +24,8 @@ void ossl_quic_reactor_init(QUIC_REACTOR *rtor,
     rtor->poll_w.type       = BIO_POLL_DESCRIPTOR_TYPE_NONE;
     rtor->net_read_desired  = 0;
     rtor->net_write_desired = 0;
+    rtor->can_poll_r        = 0;
+    rtor->can_poll_w        = 0;
     rtor->tick_deadline     = initial_tick_deadline;
 
     rtor->tick_cb           = tick_cb;
@@ -32,22 +34,50 @@ void ossl_quic_reactor_init(QUIC_REACTOR *rtor,
 
 void ossl_quic_reactor_set_poll_r(QUIC_REACTOR *rtor, const BIO_POLL_DESCRIPTOR *r)
 {
-    rtor->poll_r = *r;
+    if (r == NULL)
+        rtor->poll_r.type = BIO_POLL_DESCRIPTOR_TYPE_NONE;
+    else
+        rtor->poll_r = *r;
+
+    rtor->can_poll_r
+        = ossl_quic_reactor_can_support_poll_descriptor(rtor, &rtor->poll_r);
 }
 
 void ossl_quic_reactor_set_poll_w(QUIC_REACTOR *rtor, const BIO_POLL_DESCRIPTOR *w)
 {
-    rtor->poll_w = *w;
+    if (w == NULL)
+        rtor->poll_w.type = BIO_POLL_DESCRIPTOR_TYPE_NONE;
+    else
+        rtor->poll_w = *w;
+
+    rtor->can_poll_w
+        = ossl_quic_reactor_can_support_poll_descriptor(rtor, &rtor->poll_w);
 }
 
-const BIO_POLL_DESCRIPTOR *ossl_quic_reactor_get_poll_r(QUIC_REACTOR *rtor)
+const BIO_POLL_DESCRIPTOR *ossl_quic_reactor_get_poll_r(const QUIC_REACTOR *rtor)
 {
     return &rtor->poll_r;
 }
 
-const BIO_POLL_DESCRIPTOR *ossl_quic_reactor_get_poll_w(QUIC_REACTOR *rtor)
+const BIO_POLL_DESCRIPTOR *ossl_quic_reactor_get_poll_w(const QUIC_REACTOR *rtor)
 {
     return &rtor->poll_w;
+}
+
+int ossl_quic_reactor_can_support_poll_descriptor(const QUIC_REACTOR *rtor,
+                                                  const BIO_POLL_DESCRIPTOR *d)
+{
+    return d->type == BIO_POLL_DESCRIPTOR_TYPE_SOCK_FD;
+}
+
+int ossl_quic_reactor_can_poll_r(const QUIC_REACTOR *rtor)
+{
+    return rtor->can_poll_r;
+}
+
+int ossl_quic_reactor_can_poll_w(const QUIC_REACTOR *rtor)
+{
+    return rtor->can_poll_w;
 }
 
 int ossl_quic_reactor_net_read_desired(QUIC_REACTOR *rtor)
@@ -342,14 +372,14 @@ int ossl_quic_reactor_block_until_pred(QUIC_REACTOR *rtor,
              * things again. If poll_two_fds returns 0, this is some other
              * non-timeout failure and we should stop here.
              *
-             * TODO(QUIC): In the future we could avoid unnecessary syscalls by
-             * not retrying network I/O that isn't ready based on the result of
-             * the poll call. However this might be difficult because it
-             * requires we do the call to poll(2) or equivalent syscall
-             * ourselves, whereas in the general case the application does the
-             * polling and just calls SSL_handle_events(). Implementing this
-             * optimisation in the future will probably therefore require API
-             * changes.
+             * TODO(QUIC FUTURE): In the future we could avoid unnecessary
+             * syscalls by not retrying network I/O that isn't ready based
+             * on the result of the poll call. However this might be difficult
+             * because it requires we do the call to poll(2) or equivalent
+             * syscall ourselves, whereas in the general case the application
+             * does the polling and just calls SSL_handle_events().
+             * Implementing this optimisation in the future will probably
+             * therefore require API changes.
              */
             return 0;
     }

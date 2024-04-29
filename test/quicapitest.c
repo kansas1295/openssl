@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -12,27 +12,31 @@
 
 #include <openssl/opensslconf.h>
 #include <openssl/quic.h>
+#include <openssl/rand.h>
 
 #include "helpers/ssltestlib.h"
 #include "helpers/quictestlib.h"
 #include "testutil.h"
 #include "testutil/output.h"
 #include "../ssl/ssl_local.h"
+#include "internal/quic_error.h"
 
 static OSSL_LIB_CTX *libctx = NULL;
 static OSSL_PROVIDER *defctxnull = NULL;
 static char *certsdir = NULL;
 static char *cert = NULL;
+static char *ccert = NULL;
+static char *cauthca = NULL;
 static char *privkey = NULL;
+static char *cprivkey = NULL;
 static char *datadir = NULL;
 
 static int is_fips = 0;
 
 /* The ssltrace test assumes some options are switched on/off */
-#if !defined(OPENSSL_NO_SSL_TRACE) && !defined(OPENSSL_NO_EC) \
-    && defined(OPENSSL_NO_ZLIB) && defined(OPENSSL_NO_BROTLI) \
-    && defined(OPENSSL_NO_ZSTD) && !defined(OPENSSL_NO_ECX) \
-    && !defined(OPENSSL_NO_DH)
+#if !defined(OPENSSL_NO_SSL_TRACE) \
+    && defined(OPENSSL_NO_BROTLI) && defined(OPENSSL_NO_ZSTD) \
+    && !defined(OPENSSL_NO_ECX) && !defined(OPENSSL_NO_DH)
 # define DO_SSL_TRACE_TEST
 #endif
 
@@ -45,93 +49,223 @@ static int is_fips = 0;
 static int test_quic_write_read(int idx)
 {
     SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *sctx = NULL;
     SSL *clientquic = NULL;
     QUIC_TSERVER *qtserv = NULL;
-    int j, ret = 0;
-    unsigned char buf[20];
+    int j, k, ret = 0;
+    unsigned char buf[20], scratch[64];
     static char *msg = "A test message";
     size_t msglen = strlen(msg);
     size_t numbytes = 0;
     int ssock = 0, csock = 0;
     uint64_t sid = UINT64_MAX;
+    SSL_SESSION *sess = NULL;
 
     if (idx >= 1 && !qtest_supports_blocking())
         return TEST_skip("Blocking tests not supported in this build");
 
+    for (k = 0; k < 2; k++) {
+        if (!TEST_ptr(cctx)
+                || !TEST_true(qtest_create_quic_objects(libctx, cctx, sctx,
+                                                        cert, privkey,
+                                                        idx >= 1
+                                                            ? QTEST_FLAG_BLOCK
+                                                            : 0,
+                                                        &qtserv, &clientquic,
+                                                        NULL, NULL))
+                || !TEST_true(SSL_set_tlsext_host_name(clientquic, "localhost")))
+            goto end;
+
+        if (sess != NULL && !TEST_true(SSL_set_session(clientquic, sess)))
+            goto end;
+
+        if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+            goto end;
+
+        if (idx >= 1) {
+            if (!TEST_true(BIO_get_fd(ossl_quic_tserver_get0_rbio(qtserv),
+                                      &ssock)))
+                goto end;
+            if (!TEST_int_gt(csock = SSL_get_rfd(clientquic), 0))
+                goto end;
+        }
+
+        sid = 0; /* client-initiated bidirectional stream */
+
+        for (j = 0; j < 2; j++) {
+            /* Check that sending and receiving app data is ok */
+            if (!TEST_true(SSL_write_ex(clientquic, msg, msglen, &numbytes))
+                || !TEST_size_t_eq(numbytes, msglen))
+                goto end;
+            if (idx >= 1) {
+                do {
+                    if (!TEST_true(wait_until_sock_readable(ssock)))
+                        goto end;
+
+                    ossl_quic_tserver_tick(qtserv);
+
+                    if (!TEST_true(ossl_quic_tserver_read(qtserv, sid, buf,
+                                                          sizeof(buf),
+                                                          &numbytes)))
+                        goto end;
+                } while (numbytes == 0);
+
+                if (!TEST_mem_eq(buf, numbytes, msg, msglen))
+                    goto end;
+            }
+
+            if (idx >= 2 && j > 0)
+                /* Introduce permanent socket error */
+                BIO_closesocket(csock);
+
+            ossl_quic_tserver_tick(qtserv);
+            if (!TEST_true(ossl_quic_tserver_write(qtserv, sid,
+                                                   (unsigned char *)msg,
+                                                   msglen, &numbytes)))
+                goto end;
+            ossl_quic_tserver_tick(qtserv);
+            SSL_handle_events(clientquic);
+
+            if (idx >= 2 && j > 0) {
+                if (!TEST_false(SSL_read_ex(clientquic, buf, 1, &numbytes))
+                        || !TEST_int_eq(SSL_get_error(clientquic, 0),
+                                        SSL_ERROR_SYSCALL)
+                        || !TEST_false(SSL_write_ex(clientquic, msg, msglen,
+                                                    &numbytes))
+                        || !TEST_int_eq(SSL_get_error(clientquic, 0),
+                                        SSL_ERROR_SYSCALL))
+                    goto end;
+                break;
+            }
+
+            /*
+            * In blocking mode the SSL_read_ex call will block until the socket
+            * is readable and has our data. In non-blocking mode we're doing
+            * everything in memory, so it should be immediately available
+            */
+            if (!TEST_true(SSL_read_ex(clientquic, buf, 1, &numbytes))
+                    || !TEST_size_t_eq(numbytes, 1)
+                    || !TEST_true(SSL_has_pending(clientquic))
+                    || !TEST_int_eq(SSL_pending(clientquic), msglen - 1)
+                    || !TEST_true(SSL_read_ex(clientquic, buf + 1,
+                                              sizeof(buf) - 1, &numbytes))
+                    || !TEST_mem_eq(buf, numbytes + 1, msg, msglen))
+                goto end;
+        }
+
+        /* Test that exporters work. */
+        if (!TEST_true(SSL_export_keying_material(clientquic, scratch,
+                        sizeof(scratch), "test", 4, (unsigned char *)"ctx", 3,
+                        1)))
+            goto end;
+
+        if (sess == NULL) {
+            /* We didn't supply a session so we're not expecting resumption */
+            if (!TEST_false(SSL_session_reused(clientquic)))
+                goto end;
+            /* We should have a session ticket by now */
+            sess = SSL_get1_session(clientquic);
+            if (!TEST_ptr(sess))
+                goto end;
+        } else {
+            /* We supplied a session so we should have resumed */
+            if (!TEST_true(SSL_session_reused(clientquic)))
+                goto end;
+        }
+
+        if (!TEST_true(qtest_shutdown(qtserv, clientquic)))
+            goto end;
+
+        if (sctx == NULL) {
+            sctx = ossl_quic_tserver_get0_ssl_ctx(qtserv);
+            if (!TEST_true(SSL_CTX_up_ref(sctx))) {
+                sctx = NULL;
+                goto end;
+            }
+        }
+        ossl_quic_tserver_free(qtserv);
+        qtserv = NULL;
+        SSL_free(clientquic);
+        clientquic = NULL;
+
+        if (idx >= 2)
+            break;
+    }
+
+    ret = 1;
+
+ end:
+    SSL_SESSION_free(sess);
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    SSL_CTX_free(sctx);
+
+    return ret;
+}
+
+/*
+ * Test that sending FIN with no data to a client blocking in SSL_read_ex() will
+ * wake up the client.
+ */
+static int test_fin_only_blocking(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *sctx = NULL;
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    const char *msg = "Hello World";
+    uint64_t sid;
+    size_t numbytes;
+    unsigned char buf[32];
+    int ret = 0;
+    OSSL_TIME timer, timediff;
+
+    if (!qtest_supports_blocking())
+        return TEST_skip("Blocking tests not supported in this build");
+
     if (!TEST_ptr(cctx)
-            || !TEST_true(qtest_create_quic_objects(libctx, cctx, cert, privkey,
-                                                    idx >= 1 ? QTEST_FLAG_BLOCK : 0,
-                                                    &qtserv, &clientquic, NULL))
-            || !TEST_true(SSL_set_tlsext_host_name(clientquic, "localhost"))
-            || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, sctx,
+                                                    cert, privkey,
+                                                    QTEST_FLAG_BLOCK,
+                                                    &qtserv, &clientquic,
+                                                    NULL, NULL))
+            || !TEST_true(SSL_set_tlsext_host_name(clientquic, "localhost")))
         goto end;
 
-    if (idx >= 1) {
-        if (!TEST_true(BIO_get_fd(ossl_quic_tserver_get0_rbio(qtserv), &ssock)))
-            goto end;
-        if (!TEST_int_gt(csock = SSL_get_rfd(clientquic), 0))
-            goto end;
-    }
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto end;
 
-    sid = 0; /* client-initiated bidirectional stream */
+    if (!TEST_true(ossl_quic_tserver_stream_new(qtserv, 0, &sid))
+            || !TEST_true(ossl_quic_tserver_write(qtserv, sid,
+                                                  (unsigned char *)msg,
+                                                  strlen(msg), &numbytes))
+            || !TEST_size_t_eq(strlen(msg), numbytes))
+        goto end;
 
-    for (j = 0; j < 2; j++) {
-        /* Check that sending and receiving app data is ok */
-        if (!TEST_true(SSL_write_ex(clientquic, msg, msglen, &numbytes))
-            || !TEST_size_t_eq(numbytes, msglen))
-            goto end;
-        if (idx >= 1) {
-            do {
-                if (!TEST_true(wait_until_sock_readable(ssock)))
-                    goto end;
+    ossl_quic_tserver_tick(qtserv);
 
-                ossl_quic_tserver_tick(qtserv);
+    if (!TEST_true(SSL_read_ex(clientquic, buf, sizeof(buf), &numbytes))
+            || !TEST_mem_eq(msg, strlen(msg), buf, numbytes))
 
-                if (!TEST_true(ossl_quic_tserver_read(qtserv, sid, buf, sizeof(buf),
-                                                      &numbytes)))
-                    goto end;
-            } while (numbytes == 0);
 
-            if (!TEST_mem_eq(buf, numbytes, msg, msglen))
-                goto end;
-        }
+        goto end;
 
-        if (idx >= 2 && j > 0)
-            /* Introduce permanent socket error */
-            BIO_closesocket(csock);
+    if (!TEST_true(ossl_quic_tserver_conclude(qtserv, sid)))
+        goto end;
 
-        ossl_quic_tserver_tick(qtserv);
-        if (!TEST_true(ossl_quic_tserver_write(qtserv, sid, (unsigned char *)msg,
-                                               msglen, &numbytes)))
-            goto end;
-        ossl_quic_tserver_tick(qtserv);
-        SSL_handle_events(clientquic);
+    timer = ossl_time_now();
+    if (!TEST_false(SSL_read_ex(clientquic, buf, sizeof(buf), &numbytes)))
+        goto end;
+    timediff = ossl_time_subtract(ossl_time_now(), timer);
 
-        if (idx >= 2 && j > 0) {
-            if (!TEST_false(SSL_read_ex(clientquic, buf, 1, &numbytes))
-                    || !TEST_int_eq(SSL_get_error(clientquic, 0),
-                                    SSL_ERROR_SYSCALL)
-                    || !TEST_false(SSL_write_ex(clientquic, msg, msglen,
-                                                &numbytes))
-                    || !TEST_int_eq(SSL_get_error(clientquic, 0),
-                                    SSL_ERROR_SYSCALL))
-                goto end;
-            break;
-        }
-
-        /*
-         * In blocking mode the SSL_read_ex call will block until the socket is
-         * readable and has our data. In non-blocking mode we're doing everything
-         * in memory, so it should be immediately available
-         */
-        if (!TEST_true(SSL_read_ex(clientquic, buf, 1, &numbytes))
-                || !TEST_size_t_eq(numbytes, 1)
-                || !TEST_true(SSL_has_pending(clientquic))
-                || !TEST_int_eq(SSL_pending(clientquic), msglen - 1)
-                || !TEST_true(SSL_read_ex(clientquic, buf + 1, sizeof(buf) - 1, &numbytes))
-                || !TEST_mem_eq(buf, numbytes + 1, msg, msglen))
-            goto end;
-    }
+    if (!TEST_int_eq(SSL_get_error(clientquic, 0), SSL_ERROR_ZERO_RETURN)
+               /*
+                * We expect the SSL_read_ex to not have blocked so this should
+                * be very fast. 20ms should be plenty.
+                */
+            || !TEST_uint64_t_le(ossl_time2ms(timediff), 20))
+        goto end;
 
     if (!TEST_true(qtest_shutdown(qtserv, clientquic)))
         goto end;
@@ -142,6 +276,7 @@ static int test_quic_write_read(int idx)
     ossl_quic_tserver_free(qtserv);
     SSL_free(clientquic);
     SSL_CTX_free(cctx);
+    SSL_CTX_free(sctx);
 
     return ret;
 }
@@ -195,6 +330,49 @@ static int test_ciphersuites(void)
     return testresult;
 }
 
+static int test_cipher_find(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    struct {
+        const unsigned char *cipherbytes;
+        int ok;
+    } testciphers[]  = {
+        { TLS13_AES_128_GCM_SHA256_BYTES, 1 },
+        { TLS13_AES_256_GCM_SHA384_BYTES, 1 },
+        { TLS13_CHACHA20_POLY1305_SHA256_BYTES, 1 },
+        { TLS13_AES_128_CCM_SHA256_BYTES, 0 },
+        { TLS13_AES_128_CCM_8_SHA256_BYTES, 0 }
+    };
+    size_t i;
+    int testresult = 0;
+
+    if (!TEST_ptr(cctx))
+        goto err;
+
+    clientquic = SSL_new(cctx);
+    if (!TEST_ptr(clientquic))
+        goto err;
+
+    for (i = 0; i < OSSL_NELEM(testciphers); i++)
+        if (testciphers[i].ok) {
+            if (!TEST_ptr(SSL_CIPHER_find(clientquic,
+                                          testciphers[i].cipherbytes)))
+                goto err;
+        } else {
+            if (!TEST_ptr_null(SSL_CIPHER_find(clientquic,
+                                               testciphers[i].cipherbytes)))
+                goto err;
+        }
+
+    testresult = 1;
+ err:
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
 /*
  * Test that SSL_version, SSL_get_version, SSL_is_quic, SSL_is_tls and
  * SSL_is_dtls return the expected results for a QUIC connection. Compare with
@@ -209,9 +387,9 @@ static int test_version(void)
     int testresult = 0;
 
     if (!TEST_ptr(cctx)
-            || !TEST_true(qtest_create_quic_objects(libctx, cctx, cert, privkey,
-                                                    0, &qtserv, &clientquic,
-                                                    NULL))
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey, 0, &qtserv,
+                                                    &clientquic, NULL, NULL))
             || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
         goto err;
 
@@ -248,18 +426,35 @@ static void strip_line_ends(char *str)
 
 static int compare_with_file(BIO *membio)
 {
-    BIO *file = NULL;
+    BIO *file = NULL, *newfile = NULL;
     char buf1[512], buf2[512];
     char *reffile;
     int ret = 0;
     size_t i;
 
+#ifdef OPENSSL_NO_ZLIB
     reffile = test_mk_file_path(datadir, "ssltraceref.txt");
+#else
+    reffile = test_mk_file_path(datadir, "ssltraceref-zlib.txt");
+#endif
     if (!TEST_ptr(reffile))
         goto err;
 
     file = BIO_new_file(reffile, "rb");
     if (!TEST_ptr(file))
+        goto err;
+
+    newfile = BIO_new_file("ssltraceref-new.txt", "wb");
+    if (!TEST_ptr(newfile))
+        goto err;
+
+    while (BIO_gets(membio, buf2, sizeof(buf2)) > 0)
+        if (BIO_puts(newfile, buf2) <= 0) {
+            TEST_error("Failed writing new file data");
+            goto err;
+        }
+
+    if (!TEST_int_ge(BIO_seek(membio, 0), 0))
         goto err;
 
     while (BIO_gets(file, buf1, sizeof(buf1)) > 0) {
@@ -291,6 +486,7 @@ static int compare_with_file(BIO *membio)
  err:
     OPENSSL_free(reffile);
     BIO_free(file);
+    BIO_free(newfile);
     return ret;
 }
 
@@ -300,24 +496,20 @@ static int compare_with_file(BIO *membio)
  */
 static int test_ssl_trace(void)
 {
-    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *cctx = NULL;
     SSL *clientquic = NULL;
     QUIC_TSERVER *qtserv = NULL;
     int testresult = 0;
-    BIO *bio = BIO_new(BIO_s_mem());
+    BIO *bio = NULL;
 
-    /*
-     * Ensure we only configure ciphersuites that are available with both the
-     * default and fips providers to get the same output in both cases
-     */
-    if (!TEST_true(SSL_CTX_set_ciphersuites(cctx, "TLS_AES_128_GCM_SHA256")))
-        goto err;
-
-    if (!TEST_ptr(cctx)
-            || !TEST_ptr(bio)
-            || !TEST_true(qtest_create_quic_objects(libctx, cctx, cert, privkey,
-                                                    0, &qtserv, &clientquic,
-                                                    NULL)))
+    if (!TEST_ptr(cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method()))
+            || !TEST_ptr(bio = BIO_new(BIO_s_mem()))
+            || !TEST_true(SSL_CTX_set_ciphersuites(cctx, "TLS_AES_128_GCM_SHA256"))
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey,
+                                                    QTEST_FLAG_FAKE_TIME,
+                                                    &qtserv,
+                                                    &clientquic, NULL, NULL)))
         goto err;
 
     SSL_set_msg_callback(clientquic, SSL_trace);
@@ -326,8 +518,15 @@ static int test_ssl_trace(void)
     if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
         goto err;
 
-    if (!TEST_true(compare_with_file(bio)))
-        goto err;
+    /* Skip the comparison of the trace when the fips provider is used. */
+    if (is_fips) {
+        /* Check whether there was something written. */
+        if (!TEST_int_gt(BIO_pending(bio), 0))
+            goto err;
+    } else {
+        if (!TEST_true(compare_with_file(bio)))
+            goto err;
+    }
 
     testresult = 1;
  err:
@@ -643,8 +842,9 @@ static int test_bio_ssl(void)
     if (!TEST_int_eq(BIO_get_ssl(cbio, &clientquic), 1))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(libctx, NULL, cert, privkey,
-                                             0, &qtserv, &clientquic, NULL)))
+    if (!TEST_true(qtest_create_quic_objects(libctx, NULL, NULL, cert, privkey,
+                                             0, &qtserv, &clientquic, NULL,
+                                             NULL)))
         goto err;
 
     msglen = strlen(msg);
@@ -705,6 +905,9 @@ static int test_bio_ssl(void)
         if (i == 1)
             break;
 
+        if (!TEST_true(SSL_set_mode(clientquic, 0)))
+            goto err;
+
         /*
          * Now create a new stream and repeat. The bottom two bits of the stream
          * id represents whether the stream is bidi and whether it is client
@@ -714,6 +917,9 @@ static int test_bio_ssl(void)
         sid = 4;
         stream = SSL_new_stream(clientquic, 0);
         if (!TEST_ptr(stream))
+            goto err;
+
+        if (!TEST_true(SSL_set_mode(stream, 0)))
             goto err;
 
         thisbio = strbio = BIO_new(BIO_f_ssl());
@@ -740,6 +946,1230 @@ static int test_bio_ssl(void)
 
     return testresult;
 }
+
+#define BACK_PRESSURE_NUM_LOOPS 10000
+/*
+ * Test that sending data from the client to the server faster than the server
+ * can process it eventually results in back pressure on the client.
+ */
+static int test_back_pressure(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    unsigned char *msg = NULL;
+    const size_t msglen = 1024;
+    unsigned char buf[64];
+    size_t readbytes, written;
+    int i;
+
+    if (!TEST_ptr(cctx)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey, 0, &qtserv,
+                                                    &clientquic, NULL, NULL))
+            || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto err;
+
+    msg = OPENSSL_malloc(msglen);
+    if (!TEST_ptr(msg))
+        goto err;
+    if (!TEST_int_eq(RAND_bytes_ex(libctx, msg, msglen, 0), 1))
+        goto err;
+
+    /*
+     * Limit to 10000 loops. If we've not seen any back pressure after that
+     * we're going to run out of memory, so abort.
+     */
+    for (i = 0; i < BACK_PRESSURE_NUM_LOOPS; i++) {
+        /* Send data from the client */
+        if (!SSL_write_ex(clientquic, msg, msglen, &written)) {
+            /* Check if we are seeing back pressure */
+            if (SSL_get_error(clientquic, 0) == SSL_ERROR_WANT_WRITE)
+                break;
+            TEST_error("Unexpected client failure");
+            goto err;
+        }
+
+        /* Receive data at the server */
+        ossl_quic_tserver_tick(qtserv);
+        if (!TEST_true(ossl_quic_tserver_read(qtserv, 0, buf, sizeof(buf),
+                                              &readbytes)))
+            goto err;
+    }
+
+    if (i == BACK_PRESSURE_NUM_LOOPS) {
+        TEST_error("No back pressure seen");
+        goto err;
+    }
+
+    testresult = 1;
+ err:
+    SSL_free(clientquic);
+    ossl_quic_tserver_free(qtserv);
+    SSL_CTX_free(cctx);
+    OPENSSL_free(msg);
+
+    return testresult;
+}
+
+
+static int dgram_ctr = 0;
+
+static void dgram_cb(int write_p, int version, int content_type,
+                     const void *buf, size_t msglen, SSL *ssl, void *arg)
+{
+    if (!write_p)
+        return;
+
+    if (content_type != SSL3_RT_QUIC_DATAGRAM)
+        return;
+
+    dgram_ctr++;
+}
+
+/* Test that we send multiple datagrams in one go when appropriate */
+static int test_multiple_dgrams(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    unsigned char *buf;
+    const size_t buflen = 1400;
+    size_t written;
+
+    buf = OPENSSL_zalloc(buflen);
+
+    if (!TEST_ptr(cctx)
+            || !TEST_ptr(buf)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey, 0, &qtserv,
+                                                    &clientquic, NULL, NULL))
+            || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto err;
+
+    dgram_ctr = 0;
+    SSL_set_msg_callback(clientquic, dgram_cb);
+    if (!TEST_true(SSL_write_ex(clientquic, buf, buflen, &written))
+            || !TEST_size_t_eq(written, buflen)
+               /* We wrote enough data for 2 datagrams */
+            || !TEST_int_eq(dgram_ctr, 2))
+        goto err;
+
+    testresult = 1;
+ err:
+    OPENSSL_free(buf);
+    SSL_free(clientquic);
+    ossl_quic_tserver_free(qtserv);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+static int non_io_retry_cert_verify_cb(X509_STORE_CTX *ctx, void *arg)
+{
+    int idx = SSL_get_ex_data_X509_STORE_CTX_idx();
+    SSL *ssl;
+    const int *allow = (int *)arg;
+
+    /* this should not happen but check anyway */
+    if (idx < 0
+        || (ssl = X509_STORE_CTX_get_ex_data(ctx, idx)) == NULL)
+        return 0;
+
+    /* If this is our first attempt then retry */
+    if (*allow == 0)
+        return SSL_set_retry_verify(ssl);
+
+    /* Otherwise do nothing - verification succeeds. Continue as normal */
+    return 1;
+}
+
+/* Test that we can handle a non-io related retry error
+ * Test 0: Non-blocking
+ * Test 1: Blocking
+ */
+static int test_non_io_retry(int idx)
+{
+    SSL_CTX *cctx;
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    int flags = 0, allow = 0;
+
+    if (idx >= 1 && !qtest_supports_blocking())
+        return TEST_skip("Blocking tests not supported in this build");
+
+    cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    if (!TEST_ptr(cctx))
+        goto err;
+
+    SSL_CTX_set_cert_verify_callback(cctx, non_io_retry_cert_verify_cb, &allow);
+
+    flags = (idx >= 1) ? QTEST_FLAG_BLOCK : 0;
+    if (!TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert, privkey,
+                                             flags, &qtserv, &clientquic, NULL,
+                                             NULL))
+            || !TEST_true(qtest_create_quic_connection_ex(qtserv, clientquic,
+                            SSL_ERROR_WANT_RETRY_VERIFY))
+            || !TEST_int_eq(SSL_want(clientquic), SSL_RETRY_VERIFY))
+        goto err;
+
+    allow = 1;
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto err;
+
+    testresult = 1;
+ err:
+    SSL_free(clientquic);
+    ossl_quic_tserver_free(qtserv);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+static int use_session_cb_cnt = 0;
+static int find_session_cb_cnt = 0;
+static const char *pskid = "Identity";
+static SSL_SESSION *serverpsk = NULL, *clientpsk = NULL;
+
+static int use_session_cb(SSL *ssl, const EVP_MD *md, const unsigned char **id,
+                          size_t *idlen, SSL_SESSION **sess)
+{
+    use_session_cb_cnt++;
+
+    if (clientpsk == NULL)
+        return 0;
+
+    SSL_SESSION_up_ref(clientpsk);
+
+    *sess = clientpsk;
+    *id = (const unsigned char *)pskid;
+    *idlen = strlen(pskid);
+
+    return 1;
+}
+
+static int find_session_cb(SSL *ssl, const unsigned char *identity,
+                           size_t identity_len, SSL_SESSION **sess)
+{
+    find_session_cb_cnt++;
+
+    if (serverpsk == NULL)
+        return 0;
+
+    /* Identity should match that set by the client */
+    if (strlen(pskid) != identity_len
+            || strncmp(pskid, (const char *)identity, identity_len) != 0)
+        return 0;
+
+    SSL_SESSION_up_ref(serverpsk);
+    *sess = serverpsk;
+
+    return 1;
+}
+
+static int test_quic_psk(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+
+    if (!TEST_ptr(cctx)
+               /* No cert or private key for the server, i.e. PSK only */
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, NULL,
+                                                    NULL, 0, &qtserv,
+                                                    &clientquic, NULL, NULL)))
+        goto end;
+
+    SSL_set_psk_use_session_callback(clientquic, use_session_cb);
+    ossl_quic_tserver_set_psk_find_session_cb(qtserv, find_session_cb);
+    use_session_cb_cnt = 0;
+    find_session_cb_cnt = 0;
+
+    clientpsk = serverpsk = create_a_psk(clientquic, SHA384_DIGEST_LENGTH);
+    if (!TEST_ptr(clientpsk))
+        goto end;
+    /* We already had one ref. Add another one */
+    SSL_SESSION_up_ref(clientpsk);
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic))
+            || !TEST_int_eq(1, find_session_cb_cnt)
+            || !TEST_int_eq(1, use_session_cb_cnt)
+               /* Check that we actually used the PSK */
+            || !TEST_true(SSL_session_reused(clientquic)))
+        goto end;
+
+    testresult = 1;
+
+ end:
+    SSL_free(clientquic);
+    ossl_quic_tserver_free(qtserv);
+    SSL_CTX_free(cctx);
+    SSL_SESSION_free(clientpsk);
+    SSL_SESSION_free(serverpsk);
+    clientpsk = serverpsk = NULL;
+
+    return testresult;
+}
+
+static int test_client_auth(int idx)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL_CTX *sctx = SSL_CTX_new_ex(libctx, NULL, TLS_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    unsigned char buf[20];
+    static char *msg = "A test message";
+    size_t msglen = strlen(msg);
+    size_t numbytes = 0;
+
+    if (!TEST_ptr(cctx) || !TEST_ptr(sctx))
+        goto err;
+
+    SSL_CTX_set_verify(sctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT
+                             | SSL_VERIFY_CLIENT_ONCE, NULL);
+
+    if (!TEST_true(SSL_CTX_load_verify_file(sctx, cauthca)))
+        goto err;
+
+    if (idx > 0
+        && (!TEST_true(SSL_CTX_use_certificate_chain_file(cctx, ccert))
+            || !TEST_true(SSL_CTX_use_PrivateKey_file(cctx, cprivkey,
+                                                      SSL_FILETYPE_PEM))))
+            goto err;
+
+    if (!TEST_true(qtest_create_quic_objects(libctx, cctx, sctx, cert,
+                                             privkey, 0, &qtserv,
+                                             &clientquic, NULL, NULL)))
+        goto err;
+
+    if (idx > 1) {
+        if (!TEST_true(ssl_ctx_add_large_cert_chain(libctx, cctx, ccert))
+            || !TEST_true(ssl_ctx_add_large_cert_chain(libctx, sctx, cert)))
+            goto err;
+    }
+
+    if (idx == 0) {
+        if (!TEST_false(qtest_create_quic_connection(qtserv, clientquic)))
+            goto err;
+
+        /* negative test passed */
+        testresult = 1;
+        goto err;
+    }
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto err;
+
+    /* Check that sending and receiving app data is ok */
+    if (!TEST_true(SSL_write_ex(clientquic, msg, msglen, &numbytes))
+        || !TEST_size_t_eq(numbytes, msglen))
+        goto err;
+
+    ossl_quic_tserver_tick(qtserv);
+    if (!TEST_true(ossl_quic_tserver_write(qtserv, 0,
+                                           (unsigned char *)msg,
+                                           msglen, &numbytes)))
+        goto err;
+
+    ossl_quic_tserver_tick(qtserv);
+    SSL_handle_events(clientquic);
+
+    if (!TEST_true(SSL_read_ex(clientquic, buf, sizeof(buf), &numbytes))
+            || !TEST_size_t_eq(numbytes, msglen)
+            || !TEST_mem_eq(buf, numbytes, msg, msglen))
+        goto err;
+
+    if (!TEST_true(qtest_shutdown(qtserv, clientquic)))
+        goto err;
+
+    testresult = 1;
+
+ err:
+    SSL_free(clientquic);
+    ossl_quic_tserver_free(qtserv);
+    SSL_CTX_free(sctx);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+/*
+ * Test that we correctly handle ALPN supplied by the application
+ * Test 0: ALPN is provided
+ * Test 1: No ALPN is provided
+ */
+static int test_alpn(int idx)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    int ret;
+
+    /*
+     * Ensure we only configure ciphersuites that are available with both the
+     * default and fips providers to get the same output in both cases
+     */
+    if (!TEST_true(SSL_CTX_set_ciphersuites(cctx, "TLS_AES_128_GCM_SHA256")))
+        goto err;
+
+    if (!TEST_ptr(cctx)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey,
+                                                    QTEST_FLAG_FAKE_TIME,
+                                                    &qtserv,
+                                                    &clientquic, NULL, NULL)))
+        goto err;
+
+    if (idx == 0) {
+        /*
+        * Clear the ALPN we set in qtest_create_quic_objects. We use TEST_false
+        * because SSL_set_alpn_protos returns 0 for success.
+        */
+        if (!TEST_false(SSL_set_alpn_protos(clientquic, NULL, 0)))
+            goto err;
+    }
+
+    ret = SSL_connect(clientquic);
+    if (!TEST_int_le(ret, 0))
+        goto err;
+    if (idx == 0) {
+        /* We expect an immediate error due to lack of ALPN */
+        if (!TEST_int_eq(SSL_get_error(clientquic, ret), SSL_ERROR_SSL))
+            goto err;
+    } else {
+        /* ALPN was provided so we expect the connection to succeed */
+        if (!TEST_int_eq(SSL_get_error(clientquic, ret), SSL_ERROR_WANT_READ)
+                || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+            goto err;
+    }
+
+    testresult = 1;
+ err:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+/*
+ * Test SSL_get_shutdown() behavior.
+ */
+static int test_get_shutdown(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+
+    if (!TEST_ptr(cctx)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey,
+                                                    QTEST_FLAG_FAKE_TIME,
+                                                    &qtserv, &clientquic,
+                                                    NULL, NULL))
+            || !TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+        goto err;
+
+    if (!TEST_int_eq(SSL_get_shutdown(clientquic), 0))
+        goto err;
+
+    if (!TEST_int_eq(SSL_shutdown(clientquic), 0))
+        goto err;
+
+    if (!TEST_int_eq(SSL_get_shutdown(clientquic), SSL_SENT_SHUTDOWN))
+        goto err;
+
+    do {
+        ossl_quic_tserver_tick(qtserv);
+        qtest_add_time(100);
+    } while (SSL_shutdown(clientquic) == 0);
+
+    if (!TEST_int_eq(SSL_get_shutdown(clientquic),
+                     SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN))
+        goto err;
+
+    testresult = 1;
+ err:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+
+    return testresult;
+}
+
+#define MAX_LOOPS   2000
+
+/*
+ * Keep retrying SSL_read_ex until it succeeds or we give up. Accept a stream
+ * if we don't already have one
+ */
+static int unreliable_client_read(SSL *clientquic, SSL **stream, void *buf,
+                                  size_t buflen, size_t *readbytes,
+                                  QUIC_TSERVER *qtserv)
+{
+    int abortctr;
+
+    /* We just do this in a loop with a sleep for simplicity */
+    for (abortctr = 0; abortctr < MAX_LOOPS; abortctr++) {
+        if (*stream == NULL) {
+            SSL_handle_events(clientquic);
+            *stream = SSL_accept_stream(clientquic, 0);
+        }
+
+        if (*stream != NULL) {
+            if (SSL_read_ex(*stream, buf, buflen, readbytes))
+                return 1;
+            if (!TEST_int_eq(SSL_get_error(*stream, 0), SSL_ERROR_WANT_READ))
+                return 0;
+        }
+        ossl_quic_tserver_tick(qtserv);
+        qtest_add_time(1);
+        qtest_wait_for_timeout(clientquic, qtserv);
+    }
+
+    TEST_error("No progress made");
+    return 0;
+}
+
+/* Keep retrying ossl_quic_tserver_read until it succeeds or we give up */
+static int unreliable_server_read(QUIC_TSERVER *qtserv, uint64_t sid,
+                                  void *buf, size_t buflen, size_t *readbytes,
+                                  SSL *clientquic)
+{
+    int abortctr;
+
+    /* We just do this in a loop with a sleep for simplicity */
+    for (abortctr = 0; abortctr < MAX_LOOPS; abortctr++) {
+        if (ossl_quic_tserver_read(qtserv, sid, buf, buflen, readbytes)
+                && *readbytes > 1)
+            return 1;
+        ossl_quic_tserver_tick(qtserv);
+        SSL_handle_events(clientquic);
+        qtest_add_time(1);
+        qtest_wait_for_timeout(clientquic, qtserv);
+    }
+
+    TEST_error("No progress made");
+    return 0;
+}
+
+/*
+ * Create a connection and send data using an unreliable transport. We introduce
+ * random noise to drop, delay and duplicate datagrams.
+ * Test 0: Introduce random noise to datagrams
+ * Test 1: As with test 0 but also split datagrams containing multiple packets
+ *         into individual datagrams so that individual packets can be affected
+ *         by noise - not just a whole datagram.
+ */
+static int test_noisy_dgram(int idx)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL, *stream[2] = { NULL, NULL };
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    uint64_t sid = 0;
+    char *msg = "Hello world!";
+    size_t msglen = strlen(msg), written, readbytes, i, j;
+    unsigned char buf[80];
+    int flags = QTEST_FLAG_NOISE | QTEST_FLAG_FAKE_TIME;
+    QTEST_FAULT *fault = NULL;
+
+    if (idx == 1)
+        flags |= QTEST_FLAG_PACKET_SPLIT;
+
+    if (!TEST_ptr(cctx)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey, flags,
+                                                    &qtserv,
+                                                    &clientquic, &fault, NULL)))
+        goto err;
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+            goto err;
+
+    if (!TEST_true(SSL_set_incoming_stream_policy(clientquic,
+                                                  SSL_INCOMING_STREAM_POLICY_ACCEPT,
+                                                  0))
+            || !TEST_true(SSL_set_default_stream_mode(clientquic,
+                                                      SSL_DEFAULT_STREAM_MODE_NONE)))
+        goto err;
+
+    for (j = 0; j < 2; j++) {
+        if (!TEST_true(ossl_quic_tserver_stream_new(qtserv, 0, &sid)))
+            goto err;
+        ossl_quic_tserver_tick(qtserv);
+        qtest_add_time(1);
+
+        /*
+         * Send data from the server to the client. Some datagrams may get
+         * lost, modified, dropped or re-ordered. We repeat 20 times to ensure
+         * we are sending enough datagrams for problems to be noticed.
+         */
+        for (i = 0; i < 20; i++) {
+            if (!TEST_true(ossl_quic_tserver_write(qtserv, sid,
+                                                   (unsigned char *)msg, msglen,
+                                                   &written))
+                    || !TEST_size_t_eq(msglen, written))
+                goto err;
+            ossl_quic_tserver_tick(qtserv);
+            qtest_add_time(1);
+
+            /*
+             * Since the underlying BIO is now noisy we may get failures that
+             * need to be retried - so we use unreliable_client_read() to
+             * handle that
+             */
+            if (!TEST_true(unreliable_client_read(clientquic, &stream[j], buf,
+                                                  sizeof(buf), &readbytes,
+                                                  qtserv))
+                    || !TEST_mem_eq(msg, msglen, buf, readbytes))
+                goto err;
+        }
+
+        /* Send data from the client to the server */
+        for (i = 0; i < 20; i++) {
+            if (!TEST_true(SSL_write_ex(stream[j], (unsigned char *)msg,
+                                        msglen, &written))
+                    || !TEST_size_t_eq(msglen, written))
+                goto err;
+
+            ossl_quic_tserver_tick(qtserv);
+            qtest_add_time(1);
+
+            /*
+             * Since the underlying BIO is now noisy we may get failures that
+             * need to be retried - so we use unreliable_server_read() to
+             * handle that
+             */
+            if (!TEST_true(unreliable_server_read(qtserv, sid, buf, sizeof(buf),
+                                                  &readbytes, clientquic))
+                    || !TEST_mem_eq(msg, msglen, buf, readbytes))
+                goto err;
+        }
+    }
+
+    testresult = 1;
+ err:
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(stream[0]);
+    SSL_free(stream[1]);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    qtest_fault_free(fault);
+
+    return testresult;
+}
+
+/*
+ * Create a connection and send some big data using a transport with limited bandwidth.
+ */
+
+#define TEST_TRANSFER_DATA_SIZE (2*1024*1024)    /* 2 MBytes */
+#define TEST_SINGLE_WRITE_SIZE (16*1024)        /* 16 kBytes */
+#define TEST_BW_LIMIT 1000                      /* 1000 Bytes/ms */
+static int test_bw_limit(void)
+{
+    SSL_CTX *cctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method());
+    SSL *clientquic = NULL;
+    QUIC_TSERVER *qtserv = NULL;
+    int testresult = 0;
+    unsigned char *msg = NULL, *recvbuf = NULL;
+    size_t sendlen = TEST_TRANSFER_DATA_SIZE;
+    size_t recvlen = TEST_TRANSFER_DATA_SIZE;
+    size_t written, readbytes;
+    int flags = QTEST_FLAG_NOISE | QTEST_FLAG_FAKE_TIME;
+    QTEST_FAULT *fault = NULL;
+    uint64_t real_bw;
+
+    if (!TEST_ptr(cctx)
+            || !TEST_true(qtest_create_quic_objects(libctx, cctx, NULL, cert,
+                                                    privkey, flags,
+                                                    &qtserv,
+                                                    &clientquic, &fault, NULL)))
+        goto err;
+
+    if (!TEST_ptr(msg = OPENSSL_zalloc(TEST_SINGLE_WRITE_SIZE))
+        || !TEST_ptr(recvbuf = OPENSSL_zalloc(TEST_SINGLE_WRITE_SIZE)))
+        goto err;
+
+    /* Set BW to 1000 Bytes/ms -> 1MByte/s both ways */
+    if (!TEST_true(qtest_fault_set_bw_limit(fault, 1000, 1000, 0)))
+        goto err;
+
+    if (!TEST_true(qtest_create_quic_connection(qtserv, clientquic)))
+            goto err;
+
+    qtest_start_stopwatch();
+
+    while (recvlen > 0) {
+        qtest_add_time(1);
+
+        if (sendlen > 0) {
+            if (!SSL_write_ex(clientquic, msg,
+                              sendlen > TEST_SINGLE_WRITE_SIZE ? TEST_SINGLE_WRITE_SIZE
+                                                               : sendlen,
+                              &written)) {
+                TEST_info("Retrying to send: %llu", (unsigned long long) sendlen);
+                if (!TEST_int_eq(SSL_get_error(clientquic, 0), SSL_ERROR_WANT_WRITE))
+                    goto err;
+            } else {
+                sendlen -= written;
+                TEST_info("Remaining to send: %llu", (unsigned long long) sendlen);
+            }
+        } else {
+            SSL_handle_events(clientquic);
+        }
+
+        if (ossl_quic_tserver_read(qtserv, 0, recvbuf,
+                                   recvlen > TEST_SINGLE_WRITE_SIZE ? TEST_SINGLE_WRITE_SIZE
+                                                                    : recvlen,
+                                   &readbytes)
+            && readbytes > 1) {
+            recvlen -= readbytes;
+            TEST_info("Remaining to recv: %llu", (unsigned long long) recvlen);
+        } else {
+            TEST_info("No progress on recv: %llu", (unsigned long long) recvlen);
+        }
+        ossl_quic_tserver_tick(qtserv);
+    }
+    real_bw = TEST_TRANSFER_DATA_SIZE / qtest_get_stopwatch_time();
+
+    TEST_info("BW limit: %d Bytes/ms Real bandwidth reached: %llu Bytes/ms",
+              TEST_BW_LIMIT, (unsigned long long)real_bw);
+
+    if (!TEST_uint64_t_lt(real_bw, TEST_BW_LIMIT))
+        goto err;
+
+    testresult = 1;
+ err:
+    OPENSSL_free(msg);
+    OPENSSL_free(recvbuf);
+    ossl_quic_tserver_free(qtserv);
+    SSL_free(clientquic);
+    SSL_CTX_free(cctx);
+    qtest_fault_free(fault);
+
+    return testresult;
+}
+
+enum {
+    TPARAM_OP_DUP,
+    TPARAM_OP_DROP,
+    TPARAM_OP_INJECT,
+    TPARAM_OP_INJECT_TWICE,
+    TPARAM_OP_INJECT_RAW,
+    TPARAM_OP_DROP_INJECT,
+    TPARAM_OP_MUTATE
+};
+
+#define TPARAM_CHECK_DUP(name, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_DUP, (reason) },
+#define TPARAM_CHECK_DROP(name, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_DROP, (reason) },
+#define TPARAM_CHECK_INJECT(name, buf, buf_len, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_INJECT, (reason), \
+      (buf), (buf_len) },
+#define TPARAM_CHECK_INJECT_A(name, buf, reason) \
+    TPARAM_CHECK_INJECT(name, buf, sizeof(buf), reason)
+#define TPARAM_CHECK_DROP_INJECT(name, buf, buf_len, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_DROP_INJECT, (reason), \
+      (buf), (buf_len) },
+#define TPARAM_CHECK_DROP_INJECT_A(name, buf, reason) \
+    TPARAM_CHECK_DROP_INJECT(name, buf, sizeof(buf), reason)
+#define TPARAM_CHECK_INJECT_TWICE(name, buf, buf_len, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_INJECT_TWICE, (reason), \
+      (buf), (buf_len) },
+#define TPARAM_CHECK_INJECT_TWICE_A(name, buf, reason) \
+    TPARAM_CHECK_INJECT_TWICE(name, buf, sizeof(buf), reason)
+#define TPARAM_CHECK_INJECT_RAW(buf, buf_len, reason) \
+    { 0, TPARAM_OP_INJECT_RAW, (reason), \
+      (buf), (buf_len) },
+#define TPARAM_CHECK_INJECT_RAW_A(buf, reason) \
+    TPARAM_CHECK_INJECT_RAW(buf, sizeof(buf), reason)
+#define TPARAM_CHECK_MUTATE(name, reason) \
+    { QUIC_TPARAM_##name, TPARAM_OP_MUTATE, (reason) },
+#define TPARAM_CHECK_INT(name, reason) \
+    TPARAM_CHECK_DROP_INJECT(name, NULL, 0, reason) \
+    TPARAM_CHECK_DROP_INJECT_A(name, bogus_int, reason) \
+    TPARAM_CHECK_DROP_INJECT_A(name, int_with_trailer, reason)
+
+struct tparam_test {
+    uint64_t    id;
+    int         op;
+    const char  *expect_fail; /* substring to expect in reason */
+    const void  *buf;
+    size_t      buf_len;
+};
+
+static const unsigned char retry_scid_1[8] = { 0 };
+
+static const unsigned char disable_active_migration_1[] = {
+    0x00
+};
+
+static const unsigned char malformed_stateless_reset_token_1[] = {
+    0x02, 0xff
+};
+
+static const unsigned char malformed_stateless_reset_token_2[] = {
+    0x01
+};
+
+static const unsigned char malformed_stateless_reset_token_3[15] = { 0 };
+
+static const unsigned char malformed_stateless_reset_token_4[17] = { 0 };
+
+static const unsigned char malformed_preferred_addr_1[] = {
+    0x0d, 0xff
+};
+
+static const unsigned char malformed_preferred_addr_2[42] = {
+    0x0d, 0x28, /* too short */
+};
+
+static const unsigned char malformed_preferred_addr_3[64] = {
+    0x0d, 0x3e, /* too long */
+};
+
+static const unsigned char malformed_preferred_addr_4[] = {
+    /* TPARAM too short for CID length indicated */
+    0x0d, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x55,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const unsigned char malformed_unknown_1[] = {
+    0xff
+};
+
+static const unsigned char malformed_unknown_2[] = {
+    0x55, 0x55,
+};
+
+static const unsigned char malformed_unknown_3[] = {
+    0x55, 0x55, 0x01,
+};
+
+static const unsigned char ack_delay_exp[] = {
+    0x03
+};
+
+static const unsigned char stateless_reset_token[16] = { 0x42 };
+
+static const unsigned char preferred_addr[] = {
+    0x44, 0x44, 0x44, 0x44,
+    0x55, 0x55,
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+    0x77, 0x77,
+    0x02, 0xAA, 0xBB,
+    0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+    0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99, 0x99,
+};
+
+static const unsigned char long_cid[21] = { 0x42 };
+
+static const unsigned char excess_ack_delay_exp[] = {
+    0x15,
+};
+
+static const unsigned char excess_max_ack_delay[] = {
+    0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+};
+
+static const unsigned char excess_initial_max_streams[] = {
+    0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+};
+
+static const unsigned char undersize_udp_payload_size[] = {
+    0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0xaf,
+};
+
+static const unsigned char undersize_active_conn_id_limit[] = {
+    0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+};
+
+static const unsigned char bogus_int[9] = { 0 };
+
+static const unsigned char int_with_trailer[2] = { 0x01 };
+
+#define QUIC_TPARAM_UNKNOWN_1   0xf1f1
+
+static const struct tparam_test tparam_tests[] = {
+    TPARAM_CHECK_DUP(ORIG_DCID,
+                     "ORIG_DCID appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_SCID,
+                     "INITIAL_SCID appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_DATA,
+                     "INITIAL_MAX_DATA appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+                     "INITIAL_MAX_STREAM_DATA_BIDI_LOCAL appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+                     "INITIAL_MAX_STREAM_DATA_BIDI_REMOTE appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_STREAM_DATA_UNI,
+                     "INITIAL_MAX_STREAM_DATA_UNI appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_STREAMS_BIDI,
+                     "INITIAL_MAX_STREAMS_BIDI appears multiple times")
+    TPARAM_CHECK_DUP(INITIAL_MAX_STREAMS_UNI,
+                     "INITIAL_MAX_STREAMS_UNI appears multiple times")
+    TPARAM_CHECK_DUP(MAX_IDLE_TIMEOUT,
+                     "MAX_IDLE_TIMEOUT appears multiple times")
+    TPARAM_CHECK_DUP(MAX_UDP_PAYLOAD_SIZE,
+                     "MAX_UDP_PAYLOAD_SIZE appears multiple times")
+    TPARAM_CHECK_DUP(ACTIVE_CONN_ID_LIMIT,
+                     "ACTIVE_CONN_ID_LIMIT appears multiple times")
+    TPARAM_CHECK_DUP(DISABLE_ACTIVE_MIGRATION,
+                     "DISABLE_ACTIVE_MIGRATION appears multiple times")
+
+    TPARAM_CHECK_DROP(INITIAL_SCID,
+                      "INITIAL_SCID was not sent but is required")
+    TPARAM_CHECK_DROP(ORIG_DCID,
+                      "ORIG_DCID was not sent but is required")
+
+    TPARAM_CHECK_INJECT_A(RETRY_SCID, retry_scid_1,
+                          "RETRY_SCID sent when not performing a retry")
+    TPARAM_CHECK_DROP_INJECT_A(DISABLE_ACTIVE_MIGRATION, disable_active_migration_1,
+                               "DISABLE_ACTIVE_MIGRATION is malformed")
+    TPARAM_CHECK_INJECT(UNKNOWN_1, NULL, 0,
+                        NULL)
+    TPARAM_CHECK_INJECT_RAW_A(malformed_stateless_reset_token_1,
+                              "STATELESS_RESET_TOKEN is malformed")
+    TPARAM_CHECK_INJECT_A(STATELESS_RESET_TOKEN,
+                          malformed_stateless_reset_token_2,
+                          "STATELESS_RESET_TOKEN is malformed")
+    TPARAM_CHECK_INJECT_A(STATELESS_RESET_TOKEN,
+                          malformed_stateless_reset_token_3,
+                          "STATELESS_RESET_TOKEN is malformed")
+    TPARAM_CHECK_INJECT_A(STATELESS_RESET_TOKEN,
+                          malformed_stateless_reset_token_4,
+                          "STATELESS_RESET_TOKEN is malformed")
+    TPARAM_CHECK_INJECT(STATELESS_RESET_TOKEN,
+                        NULL, 0,
+                        "STATELESS_RESET_TOKEN is malformed")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_preferred_addr_1,
+                              "PREFERRED_ADDR is malformed")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_preferred_addr_2,
+                              "PREFERRED_ADDR is malformed")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_preferred_addr_3,
+                              "PREFERRED_ADDR is malformed")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_preferred_addr_4,
+                              "PREFERRED_ADDR is malformed")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_unknown_1,
+                              "bad transport parameter")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_unknown_2,
+                              "bad transport parameter")
+    TPARAM_CHECK_INJECT_RAW_A(malformed_unknown_3,
+                              "bad transport parameter")
+
+    TPARAM_CHECK_INJECT_A(ACK_DELAY_EXP, excess_ack_delay_exp,
+                          "ACK_DELAY_EXP is malformed")
+    TPARAM_CHECK_INJECT_A(MAX_ACK_DELAY, excess_max_ack_delay,
+                          "MAX_ACK_DELAY is malformed")
+    TPARAM_CHECK_DROP_INJECT_A(INITIAL_MAX_STREAMS_BIDI, excess_initial_max_streams,
+                               "INITIAL_MAX_STREAMS_BIDI is malformed")
+    TPARAM_CHECK_DROP_INJECT_A(INITIAL_MAX_STREAMS_UNI, excess_initial_max_streams,
+                               "INITIAL_MAX_STREAMS_UNI is malformed")
+
+    TPARAM_CHECK_DROP_INJECT_A(MAX_UDP_PAYLOAD_SIZE, undersize_udp_payload_size,
+                               "MAX_UDP_PAYLOAD_SIZE is malformed")
+    TPARAM_CHECK_DROP_INJECT_A(ACTIVE_CONN_ID_LIMIT, undersize_active_conn_id_limit,
+                               "ACTIVE_CONN_ID_LIMIT is malformed")
+
+    TPARAM_CHECK_INJECT_TWICE_A(ACK_DELAY_EXP, ack_delay_exp,
+                                "ACK_DELAY_EXP appears multiple times")
+    TPARAM_CHECK_INJECT_TWICE_A(MAX_ACK_DELAY, ack_delay_exp,
+                                "MAX_ACK_DELAY appears multiple times")
+    TPARAM_CHECK_INJECT_TWICE_A(STATELESS_RESET_TOKEN, stateless_reset_token,
+                                "STATELESS_RESET_TOKEN appears multiple times")
+    TPARAM_CHECK_INJECT_TWICE_A(PREFERRED_ADDR, preferred_addr,
+                                "PREFERRED_ADDR appears multiple times")
+
+    TPARAM_CHECK_MUTATE(ORIG_DCID,
+                        "ORIG_DCID does not match expected value")
+    TPARAM_CHECK_MUTATE(INITIAL_SCID,
+                        "INITIAL_SCID does not match expected value")
+
+    TPARAM_CHECK_DROP_INJECT_A(ORIG_DCID, long_cid,
+                               "ORIG_DCID is malformed")
+    TPARAM_CHECK_DROP_INJECT_A(INITIAL_SCID, long_cid,
+                               "INITIAL_SCID is malformed")
+
+    TPARAM_CHECK_INT(INITIAL_MAX_DATA,
+                     "INITIAL_MAX_DATA is malformed")
+    TPARAM_CHECK_INT(INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+                     "INITIAL_MAX_STREAM_DATA_BIDI_LOCAL is malformed")
+    TPARAM_CHECK_INT(INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+                     "INITIAL_MAX_STREAM_DATA_BIDI_REMOTE is malformed")
+    TPARAM_CHECK_INT(INITIAL_MAX_STREAM_DATA_UNI,
+                     "INITIAL_MAX_STREAM_DATA_UNI is malformed")
+    TPARAM_CHECK_INT(ACK_DELAY_EXP,
+                     "ACK_DELAY_EXP is malformed")
+    TPARAM_CHECK_INT(MAX_ACK_DELAY,
+                     "MAX_ACK_DELAY is malformed")
+    TPARAM_CHECK_INT(INITIAL_MAX_STREAMS_BIDI,
+                     "INITIAL_MAX_STREAMS_BIDI is malformed")
+    TPARAM_CHECK_INT(INITIAL_MAX_STREAMS_UNI,
+                     "INITIAL_MAX_STREAMS_UNI is malformed")
+    TPARAM_CHECK_INT(MAX_IDLE_TIMEOUT,
+                     "MAX_IDLE_TIMEOUT is malformed")
+    TPARAM_CHECK_INT(MAX_UDP_PAYLOAD_SIZE,
+                     "MAX_UDP_PAYLOAD_SIZE is malformed")
+    TPARAM_CHECK_INT(ACTIVE_CONN_ID_LIMIT,
+                     "ACTIVE_CONN_ID_LIMIT is malformed")
+};
+
+struct tparam_ctx {
+    const struct tparam_test *t;
+};
+
+static int tparam_handle(struct tparam_ctx *ctx,
+                         uint64_t id, unsigned char *data,
+                         size_t data_len,
+                         WPACKET *wpkt)
+{
+    const struct tparam_test *t = ctx->t;
+
+    switch (t->op) {
+    case TPARAM_OP_DUP:
+        if (!TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(wpkt, id,
+                                                                  data, data_len)))
+            return 0;
+
+        /*
+         * If this is the matching ID, write it again, duplicating the TPARAM.
+         */
+        if (id == t->id
+            && !TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(wpkt, id,
+                                                                     data, data_len)))
+            return 0;
+
+        return 1;
+
+    case TPARAM_OP_DROP:
+    case TPARAM_OP_DROP_INJECT:
+        /* Pass through unless ID matches. */
+        if (id != t->id
+            && !TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(wpkt, id,
+                                                                     data, data_len)))
+            return 0;
+
+        return 1;
+
+    case TPARAM_OP_INJECT:
+    case TPARAM_OP_INJECT_TWICE:
+    case TPARAM_OP_INJECT_RAW:
+        /* Always pass through. */
+        if (!TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(wpkt, id,
+                                                                  data, data_len)))
+            return 0;
+
+        return 1;
+
+    case TPARAM_OP_MUTATE:
+        if (id == t->id) {
+            if (!TEST_size_t_gt(data_len, 0))
+                return 0;
+
+            data[0] ^= 1;
+        }
+
+        if (!TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(wpkt, id,
+                                                                  data, data_len)))
+            return 0;
+
+        if (id == t->id)
+            data[0] ^= 1;
+
+        return 1;
+
+    default:
+        return 0;
+    }
+}
+
+static int tparam_on_enc_ext(QTEST_FAULT *qtf, QTEST_ENCRYPTED_EXTENSIONS *ee,
+                             size_t ee_len, void *arg)
+{
+    int rc = 0;
+    struct tparam_ctx *ctx = arg;
+    PACKET pkt = {0};
+    WPACKET wpkt;
+    int have_wpkt = 0;
+    BUF_MEM *old_bufm = NULL, *new_bufm = NULL;
+    unsigned char *tp_p;
+    size_t tp_len, written, old_len, eb_len;
+    uint64_t id;
+
+    if (!TEST_ptr(old_bufm = BUF_MEM_new()))
+        goto err;
+
+    /*
+     * Delete transport parameters TLS extension and capture the contents of the
+     * extension which was removed.
+     */
+    if (!TEST_true(qtest_fault_delete_extension(qtf, TLSEXT_TYPE_quic_transport_parameters,
+                                                ee->extensions, &ee->extensionslen,
+                                                old_bufm)))
+        goto err;
+
+    if (!TEST_true(PACKET_buf_init(&pkt, (unsigned char *)old_bufm->data, old_bufm->length))
+        || !TEST_ptr(new_bufm = BUF_MEM_new())
+        || !TEST_true(WPACKET_init(&wpkt, new_bufm)))
+        goto err;
+
+    have_wpkt = 1;
+
+    /*
+     * Open transport parameters TLS extension:
+     *
+     *   u16  Extension ID (quic_transport_parameters)
+     *   u16  Extension Data Length
+     *   ...  Extension Data
+     *
+     */
+    if (!TEST_true(WPACKET_put_bytes_u16(&wpkt,
+                                         TLSEXT_TYPE_quic_transport_parameters))
+        || !TEST_true(WPACKET_start_sub_packet_u16(&wpkt)))
+        goto err;
+
+    for (; PACKET_remaining(&pkt) > 0; ) {
+        tp_p = (unsigned char *)ossl_quic_wire_decode_transport_param_bytes(&pkt,
+                                                                            &id,
+                                                                            &tp_len);
+        if (!TEST_ptr(tp_p)) {
+            TEST_mem_eq(PACKET_data(&pkt), PACKET_remaining(&pkt), NULL, 0);
+            goto err;
+        }
+
+        if (!TEST_true(tparam_handle(ctx, id, tp_p, tp_len, &wpkt)))
+            goto err;
+    }
+
+    if (ctx->t->op == TPARAM_OP_INJECT || ctx->t->op == TPARAM_OP_DROP_INJECT
+        || ctx->t->op == TPARAM_OP_INJECT_TWICE) {
+        if (!TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(&wpkt, ctx->t->id,
+                                                                  ctx->t->buf,
+                                                                  ctx->t->buf_len)))
+            goto err;
+
+        if (ctx->t->op == TPARAM_OP_INJECT_TWICE
+            && !TEST_ptr(ossl_quic_wire_encode_transport_param_bytes(&wpkt, ctx->t->id,
+                                                                     ctx->t->buf,
+                                                                     ctx->t->buf_len)))
+            goto err;
+    } else if (ctx->t->op == TPARAM_OP_INJECT_RAW) {
+        if (!TEST_true(WPACKET_memcpy(&wpkt, ctx->t->buf, ctx->t->buf_len)))
+            goto err;
+    }
+
+    if (!TEST_true(WPACKET_close(&wpkt))) /* end extension data, set length */
+        goto err;
+
+    if (!TEST_true(WPACKET_get_total_written(&wpkt, &written)))
+        goto err;
+
+    WPACKET_finish(&wpkt);
+    have_wpkt = 0;
+
+    /*
+     * Append the constructed extension blob to the extension block.
+     */
+    old_len = ee->extensionslen;
+
+    if (!qtest_fault_resize_message(qtf, ee->extensionslen + written))
+        goto err;
+
+    memcpy(ee->extensions + old_len, new_bufm->data, written);
+
+    /* Fixup the extension block header (u16 length of entire block). */
+    eb_len = (((uint16_t)ee->extensions[0]) << 8) + (uint16_t)ee->extensions[1];
+    eb_len += written;
+    ee->extensions[0] = (unsigned char)((eb_len >> 8) & 0xFF);
+    ee->extensions[1] = (unsigned char)( eb_len       & 0xFF);
+
+    rc = 1;
+err:
+    if (have_wpkt)
+        WPACKET_cleanup(&wpkt);
+    BUF_MEM_free(old_bufm);
+    BUF_MEM_free(new_bufm);
+    return rc;
+}
+
+static int test_tparam(int idx)
+{
+    int testresult = 0;
+    SSL_CTX *c_ctx = NULL;
+    SSL *c_ssl = NULL;
+    QUIC_TSERVER *s = NULL;
+    QTEST_FAULT *qtf = NULL;
+    struct tparam_ctx ctx = {0};
+
+    ctx.t = &tparam_tests[idx];
+
+    if (!TEST_ptr(c_ctx = SSL_CTX_new_ex(libctx, NULL, OSSL_QUIC_client_method())))
+        goto err;
+
+    if (!TEST_true(qtest_create_quic_objects(libctx, c_ctx, NULL, cert,
+                                             privkey, 0, &s,
+                                             &c_ssl, &qtf, NULL)))
+        goto err;
+
+    if (!TEST_true(qtest_fault_set_hand_enc_ext_listener(qtf, tparam_on_enc_ext,
+                                                         &ctx)))
+        goto err;
+
+    if (!TEST_true(qtest_create_quic_connection_ex(s, c_ssl,
+                                                   ctx.t->expect_fail != NULL)))
+        goto err;
+
+    if (ctx.t->expect_fail != NULL) {
+        SSL_CONN_CLOSE_INFO info = {0};
+
+        if (!TEST_true(SSL_get_conn_close_info(c_ssl, &info, sizeof(info))))
+            goto err;
+
+        if (!TEST_true((info.flags & SSL_CONN_CLOSE_FLAG_TRANSPORT) != 0)
+            || !TEST_uint64_t_eq(info.error_code, OSSL_QUIC_ERR_TRANSPORT_PARAMETER_ERROR)
+            || !TEST_ptr(strstr(info.reason, ctx.t->expect_fail))) {
+            TEST_error("expected connection closure information mismatch"
+                       " during TPARAM test: flags=%llu ec=%llu reason='%s'",
+                       (unsigned long long)info.flags,
+                       (unsigned long long)info.error_code,
+                       info.reason);
+            goto err;
+        }
+    }
+
+    testresult = 1;
+err:
+    if (!testresult) {
+        if (ctx.t->expect_fail != NULL)
+            TEST_info("failed during test for id=%llu, op=%d, bl=%zu, "
+                      "expected failure='%s'", (unsigned long long)ctx.t->id,
+                      ctx.t->op, ctx.t->buf_len, ctx.t->expect_fail);
+        else
+            TEST_info("failed during test for id=%llu, op=%d, bl=%zu",
+                      (unsigned long long)ctx.t->id, ctx.t->op, ctx.t->buf_len);
+    }
+
+    ossl_quic_tserver_free(s);
+    SSL_free(c_ssl);
+    SSL_CTX_free(c_ctx);
+    qtest_fault_free(qtf);
+    return testresult;
+}
+/***********************************************************************************/
 
 OPT_TEST_DECLARE_USAGE("provider config certsdir datadir\n")
 
@@ -792,12 +2222,26 @@ int setup_tests(void)
     if (cert == NULL)
         goto err;
 
+    ccert = test_mk_file_path(certsdir, "ee-client-chain.pem");
+    if (ccert == NULL)
+        goto err;
+
+    cauthca = test_mk_file_path(certsdir, "root-cert.pem");
+    if (cauthca == NULL)
+        goto err;
+
     privkey = test_mk_file_path(certsdir, "serverkey.pem");
     if (privkey == NULL)
         goto err;
 
+    cprivkey = test_mk_file_path(certsdir, "ee-key.pem");
+    if (privkey == NULL)
+        goto err;
+
     ADD_ALL_TESTS(test_quic_write_read, 3);
+    ADD_TEST(test_fin_only_blocking);
     ADD_TEST(test_ciphersuites);
+    ADD_TEST(test_cipher_find);
     ADD_TEST(test_version);
 #if defined(DO_SSL_TRACE_TEST)
     ADD_TEST(test_ssl_trace);
@@ -807,6 +2251,17 @@ int setup_tests(void)
     ADD_TEST(test_quic_forbidden_options);
     ADD_ALL_TESTS(test_quic_set_fd, 3);
     ADD_TEST(test_bio_ssl);
+    ADD_TEST(test_back_pressure);
+    ADD_TEST(test_multiple_dgrams);
+    ADD_ALL_TESTS(test_non_io_retry, 2);
+    ADD_TEST(test_quic_psk);
+    ADD_ALL_TESTS(test_client_auth, 3);
+    ADD_ALL_TESTS(test_alpn, 2);
+    ADD_ALL_TESTS(test_noisy_dgram, 2);
+    ADD_TEST(test_bw_limit);
+    ADD_TEST(test_get_shutdown);
+    ADD_ALL_TESTS(test_tparam, OSSL_NELEM(tparam_tests));
+
     return 1;
  err:
     cleanup_tests();
@@ -815,8 +2270,13 @@ int setup_tests(void)
 
 void cleanup_tests(void)
 {
+    bio_f_noisy_dgram_filter_free();
+    bio_f_pkt_split_dgram_filter_free();
     OPENSSL_free(cert);
     OPENSSL_free(privkey);
+    OPENSSL_free(ccert);
+    OPENSSL_free(cauthca);
+    OPENSSL_free(cprivkey);
     OSSL_PROVIDER_unload(defctxnull);
     OSSL_LIB_CTX_free(libctx);
 }

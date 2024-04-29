@@ -3,12 +3,12 @@
 =head1 NAME
 
 ossl-guide-tls-introduction
-- OpenSSL Guide: An introduction to TLS in OpenSSL
+- OpenSSL Guide: An introduction to SSL/TLS in OpenSSL
 
 =head1 INTRODUCTION
 
-This page will provide an introduction to some basic TLS concepts and background
-and how it is used within OpenSSL. It assumes that you have a basic
+This page will provide an introduction to some basic SSL/TLS concepts and
+background and how it is used within OpenSSL. It assumes that you have a basic
 understanding of TCP/IP and sockets.
 
 =head1 WHAT IS TLS?
@@ -168,7 +168,7 @@ You can also use environment variables to override the default location that
 OpenSSL will look for its trusted certificate store. Set the B<SSL_CERT_PATH>
 environment variable to give the directory where OpenSSL should looks for its
 certificates or the B<SSL_CERT_FILE> environment variable to give the name of
-a single file containing all of the certifictes. See L<openssl-env(7)> for
+a single file containing all of the certificates. See L<openssl-env(7)> for
 further details about OpenSSL environment variables. For example you could use
 this capability to have multiple versions of OpenSSL all installed on the same
 system using different values for B<OPENSSLDIR> but all using the same
@@ -194,7 +194,7 @@ If its not working as expected then you might see output like this instead:
  Verification error: unable to get local issuer certificate
 
 The "unable to get local issuer certificate" error means that OpenSSL has been
-unable to find a trusted CA for the chain of certifictes provided by the server
+unable to find a trusted CA for the chain of certificates provided by the server
 in its trusted certificate store. Check your trusted certificate store
 configuration again.
 
@@ -301,7 +301,8 @@ See L<ossl-guide-quic-introduction(7)> for an introduction to QUIC in OpenSSL.
 
 =head1 SEE ALSO
 
-L<crypto(7)>, L<ossl-guide-tls-client-block(7)>,
+L<ossl-guide-introduction(7)>, L<ossl-guide-libraries-introduction(7)>,
+L<ossl-guide-libssl-introduction(7)>, L<ossl-guide-tls-client-block(7)>,
 L<ossl-guide-quic-introduction(7)>
 
 =head1 COPYRIGHT

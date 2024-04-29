@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -16,6 +16,15 @@
 # include "internal/refcount.h"
 # include "crypto/ecx.h"
 
+/*
+ * Default PKCS5 PBE KDF salt lengths
+ * In RFC 8018, PBE1 uses 8 bytes (64 bits) for its salt length.
+ * It also specifies to use at least 8 bytes for PBES2.
+ * The NIST requirement for PBKDF2 is 128 bits so we use this as the
+ * default for PBE2 (scrypt and HKDF2)
+ */
+# define PKCS5_DEFAULT_PBE1_SALT_LEN     PKCS5_SALT_LEN
+# define PKCS5_DEFAULT_PBE2_SALT_LEN     16
 /*
  * Don't free up md_ctx->pctx in EVP_MD_CTX_reset, use the reserved flag
  * values in evp.h
@@ -273,6 +282,7 @@ struct evp_md_st {
     OSSL_FUNC_digest_init_fn *dinit;
     OSSL_FUNC_digest_update_fn *dupdate;
     OSSL_FUNC_digest_final_fn *dfinal;
+    OSSL_FUNC_digest_squeeze_fn *dsqueeze;
     OSSL_FUNC_digest_digest_fn *digest;
     OSSL_FUNC_digest_freectx_fn *freectx;
     OSSL_FUNC_digest_dupctx_fn *dupctx;
@@ -812,7 +822,7 @@ int evp_keymgmt_set_params(const EVP_KEYMGMT *keymgmt,
 void *evp_keymgmt_gen_init(const EVP_KEYMGMT *keymgmt, int selection,
                            const OSSL_PARAM params[]);
 int evp_keymgmt_gen_set_template(const EVP_KEYMGMT *keymgmt, void *genctx,
-                                 void *template);
+                                 void *templ);
 int evp_keymgmt_gen_set_params(const EVP_KEYMGMT *keymgmt, void *genctx,
                                const OSSL_PARAM params[]);
 void *evp_keymgmt_gen(const EVP_KEYMGMT *keymgmt, void *genctx,
@@ -941,9 +951,18 @@ int evp_kdf_get_number(const EVP_KDF *kdf);
 int evp_kem_get_number(const EVP_KEM *wrap);
 int evp_keyexch_get_number(const EVP_KEYEXCH *keyexch);
 int evp_keymgmt_get_number(const EVP_KEYMGMT *keymgmt);
+int evp_keymgmt_get_legacy_alg(const EVP_KEYMGMT *keymgmt);
 int evp_mac_get_number(const EVP_MAC *mac);
 int evp_md_get_number(const EVP_MD *md);
 int evp_rand_get_number(const EVP_RAND *rand);
+int evp_rand_can_seed(EVP_RAND_CTX *ctx);
+size_t evp_rand_get_seed(EVP_RAND_CTX *ctx,
+                         unsigned char **buffer,
+                         int entropy, size_t min_len, size_t max_len,
+                         int prediction_resistance,
+                         const unsigned char *adin, size_t adin_len);
+void evp_rand_clear_seed(EVP_RAND_CTX *ctx,
+                         unsigned char *buffer, size_t b_len);
 int evp_signature_get_number(const EVP_SIGNATURE *signature);
 
 int evp_pkey_decrypt_alloc(EVP_PKEY_CTX *ctx, unsigned char **outp,

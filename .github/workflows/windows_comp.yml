@@ -1,4 +1,4 @@
-# Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -22,7 +22,7 @@ jobs:
   zstd:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: checkout fuzz/corpora submodule
       run: git submodule update --init --depth 1 fuzz/corpora
     - uses: ilammy/msvc-dev-cmd@v1
@@ -41,6 +41,21 @@ jobs:
     - name: build
       working-directory: _build
       run: nmake
+    - name: download coreinfo
+      uses: suisei-cn/actions-download-file@v1.6.0
+      with:
+        url: "https://download.sysinternals.com/files/Coreinfo.zip"
+        target: _build/coreinfo/
+    - name: get cpu info
+      working-directory: _build
+      continue-on-error: true
+      run: |
+        7z.exe x coreinfo/Coreinfo.zip
+        ./Coreinfo64.exe -accepteula -f
+        ./apps/openssl.exe version -c
+    - name: Check platform symbol usage
+      run: |
+        perl ./util/checkplatformsyms.pl ./util/platform_symbols/windows-symbols.txt libcrypto-3-x64.dll ./libssl-3-x64.dll
     - name: test
       working-directory: _build
       run: |
@@ -49,7 +64,7 @@ jobs:
   brotli:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: checkout fuzz/corpora submodule
       run: git submodule update --init --depth 1 fuzz/corpora
     - uses: ilammy/msvc-dev-cmd@v1
@@ -68,6 +83,18 @@ jobs:
     - name: build
       working-directory: _build
       run: nmake
+    - name: download coreinfo
+      uses: suisei-cn/actions-download-file@v1.6.0
+      with:
+        url: "https://download.sysinternals.com/files/Coreinfo.zip"
+        target: _build/coreinfo/
+    - name: get cpu info
+      working-directory: _build
+      continue-on-error: true
+      run: |
+        7z.exe x coreinfo/Coreinfo.zip
+        ./Coreinfo64.exe -accepteula -f
+        ./apps/openssl.exe version -c
     - name: test
       working-directory: _build
       run: |

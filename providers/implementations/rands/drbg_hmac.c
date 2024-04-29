@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -298,8 +298,8 @@ static int drbg_hmac_verify_zeroization(void *vdrbg)
     if (drbg->lock != NULL && !CRYPTO_THREAD_read_lock(drbg->lock))
         return 0;
 
-    PROV_DRBG_VERYIFY_ZEROIZATION(hmac->K);
-    PROV_DRBG_VERYIFY_ZEROIZATION(hmac->V);
+    PROV_DRBG_VERIFY_ZEROIZATION(hmac->K);
+    PROV_DRBG_VERIFY_ZEROIZATION(hmac->V);
 
     ret = 1;
  err:
@@ -331,7 +331,8 @@ static int drbg_hmac_new(PROV_DRBG *drbg)
 static void *drbg_hmac_new_wrapper(void *provctx, void *parent,
                                    const OSSL_DISPATCH *parent_dispatch)
 {
-    return ossl_rand_drbg_new(provctx, parent, parent_dispatch, &drbg_hmac_new,
+    return ossl_rand_drbg_new(provctx, parent, parent_dispatch,
+                              &drbg_hmac_new, &drbg_hmac_free,
                               &drbg_hmac_instantiate, &drbg_hmac_uninstantiate,
                               &drbg_hmac_reseed, &drbg_hmac_generate);
 }
@@ -409,6 +410,7 @@ static int drbg_hmac_set_ctx_params_locked(void *vctx, const OSSL_PARAM params[]
     PROV_DRBG_HMAC *hmac = (PROV_DRBG_HMAC *)ctx->data;
     OSSL_LIB_CTX *libctx = PROV_LIBCTX_OF(ctx->provctx);
     const EVP_MD *md;
+    int md_size;
 
     if (!ossl_prov_digest_load_from_params(&hmac->digest, params, libctx))
         return 0;
@@ -423,7 +425,10 @@ static int drbg_hmac_set_ctx_params_locked(void *vctx, const OSSL_PARAM params[]
 
     if (md != NULL && hmac->ctx != NULL) {
         /* These are taken from SP 800-90 10.1 Table 2 */
-        hmac->blocklen = EVP_MD_get_size(md);
+        md_size = EVP_MD_get_size(md);
+        if (md_size <= 0)
+            return 0;
+        hmac->blocklen = (size_t)md_size;
         /* See SP800-57 Part1 Rev4 5.6.1 Table 3 */
         ctx->strength = 64 * (int)(hmac->blocklen >> 3);
         if (ctx->strength > 256)

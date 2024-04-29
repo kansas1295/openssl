@@ -16,4 +16,9 @@
 typedef void (*ossl_msg_cb)(int write_p, int version, int content_type,
                             const void *buf, size_t len, SSL *ssl, void *arg);
 
+int ossl_ssl_get_error(const SSL *s, int i, int check_err);
+
+/* Set if this is the QUIC handshake layer */
+# define TLS1_FLAGS_QUIC                         0x2000
+
 #endif

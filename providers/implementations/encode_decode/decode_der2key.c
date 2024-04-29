@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2020-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -89,6 +89,7 @@ struct keytype_desc_st {
  */
 struct der2key_ctx_st {
     PROV_CTX *provctx;
+    char propq[OSSL_MAX_PROPQUERY_SIZE];
     const struct keytype_desc_st *desc;
     /* The selection that is passed to der2key_decode() */
     int selection;
@@ -109,7 +110,7 @@ static void *der2key_decode_p8(const unsigned char **input_der,
     if ((p8inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, input_der, input_der_len)) != NULL
         && PKCS8_pkey_get0(NULL, NULL, NULL, &alg, p8inf)
         && OBJ_obj2nid(alg->algorithm) == ctx->desc->evp_type)
-        key = key_from_pkcs8(p8inf, PROV_LIBCTX_OF(ctx->provctx), NULL);
+        key = key_from_pkcs8(p8inf, PROV_LIBCTX_OF(ctx->provctx), ctx->propq);
     PKCS8_PRIV_KEY_INFO_free(p8inf);
 
     return key;
@@ -120,6 +121,8 @@ static void *der2key_decode_p8(const unsigned char **input_der,
 static OSSL_FUNC_decoder_freectx_fn der2key_freectx;
 static OSSL_FUNC_decoder_decode_fn der2key_decode;
 static OSSL_FUNC_decoder_export_object_fn der2key_export_object;
+static OSSL_FUNC_decoder_settable_ctx_params_fn der2key_settable_ctx_params;
+static OSSL_FUNC_decoder_set_ctx_params_fn der2key_set_ctx_params;
 
 static struct der2key_ctx_st *
 der2key_newctx(void *provctx, const struct keytype_desc_st *desc)
@@ -131,6 +134,28 @@ der2key_newctx(void *provctx, const struct keytype_desc_st *desc)
         ctx->desc = desc;
     }
     return ctx;
+}
+
+static const OSSL_PARAM *der2key_settable_ctx_params(ossl_unused void *provctx)
+{
+    static const OSSL_PARAM settables[] = {
+        OSSL_PARAM_utf8_string(OSSL_DECODER_PARAM_PROPERTIES, NULL, 0),
+        OSSL_PARAM_END
+    };
+    return settables;
+}
+
+static int der2key_set_ctx_params(void *vctx, const OSSL_PARAM params[])
+{
+    struct der2key_ctx_st *ctx = vctx;
+    const OSSL_PARAM *p;
+    char *str = ctx->propq;
+
+    p = OSSL_PARAM_locate_const(params, OSSL_DECODER_PARAM_PROPERTIES);
+    if (p != NULL && !OSSL_PARAM_get_utf8_string(p, &str, sizeof(ctx->propq)))
+        return 0;
+
+    return 1;
 }
 
 static void der2key_freectx(void *vctx)
@@ -317,10 +342,14 @@ static int der2key_export_object(void *vctx,
     void *keydata;
 
     if (reference_sz == sizeof(keydata) && export != NULL) {
+        int selection = ctx->selection;
+
+        if (selection == 0)
+            selection = OSSL_KEYMGMT_SELECT_ALL;
         /* The contents of the reference is the address to our object */
         keydata = *(void **)reference;
 
-        return export(keydata, ctx->selection, export_cb, export_cbarg);
+        return export(keydata, selection, export_cb, export_cbarg);
     }
     return 0;
 }
@@ -751,6 +780,10 @@ static void rsa_adjust(void *key, struct der2key_ctx_st *ctx)
           (void (*)(void))der2key_decode },                             \
         { OSSL_FUNC_DECODER_EXPORT_OBJECT,                              \
           (void (*)(void))der2key_export_object },                      \
+        { OSSL_FUNC_DECODER_SETTABLE_CTX_PARAMS,                        \
+          (void (*)(void))der2key_settable_ctx_params },                \
+        { OSSL_FUNC_DECODER_SET_CTX_PARAMS,                             \
+          (void (*)(void))der2key_set_ctx_params },                     \
         OSSL_DISPATCH_END                                               \
     }
 

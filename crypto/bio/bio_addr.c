@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -65,14 +65,29 @@ void BIO_ADDR_free(BIO_ADDR *ap)
     OPENSSL_free(ap);
 }
 
+int BIO_ADDR_copy(BIO_ADDR *dst, const BIO_ADDR *src)
+{
+    if (dst == NULL || src == NULL)
+        return 0;
+
+    if (src->sa.sa_family == AF_UNSPEC) {
+        BIO_ADDR_clear(dst);
+        return 1;
+    }
+
+    return BIO_ADDR_make(dst, &src->sa);
+}
+
 BIO_ADDR *BIO_ADDR_dup(const BIO_ADDR *ap)
 {
     BIO_ADDR *ret = NULL;
 
     if (ap != NULL) {
         ret = BIO_ADDR_new();
-        if (ret != NULL)
-            BIO_ADDR_make(ret, &ap->sa);
+        if (ret != NULL && !BIO_ADDR_copy(ret, ap)) {
+            BIO_ADDR_free(ret);
+            ret = NULL;
+        }
     }
     return ret;
 }

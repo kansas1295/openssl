@@ -1,5 +1,5 @@
 /*
- * Copyright 2021-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2021-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -15,7 +15,6 @@
 #include "crypto/sm4_platform.h"
 
 # define SM4_GCM_HW_SET_KEY_CTR_FN(ks, fn_set_enc_key, fn_block, fn_ctr)       \
-    ctx->ks = ks;                                                              \
     fn_set_enc_key(key, ks);                                                   \
     CRYPTO_gcm128_init(&ctx->gcm, ks, (block128_f)fn_block);                   \
     ctx->ctr = (ctr128_f)fn_ctr;                                               \
@@ -90,7 +89,11 @@ static const PROV_GCM_HW sm4_gcm = {
     ossl_gcm_one_shot
 };
 
+#if defined(__riscv) && __riscv_xlen == 64
+# include "cipher_sm4_gcm_hw_rv64i.inc"
+#else
 const PROV_GCM_HW *ossl_prov_sm4_hw_gcm(size_t keybits)
 {
     return &sm4_gcm;
 }
+#endif

@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -43,7 +43,7 @@
 
 #define DEFAULT_KEY_LENGTH 2048
 #define MIN_KEY_LENGTH     512
-#define DEFAULT_DAYS       30 /* default cert validity period in days */
+#define DEFAULT_DAYS       30 /* default certificate validity period in days */
 #define UNSET_DAYS         -2 /* -1 may be used for testing expiration checks */
 #define EXT_COPY_UNSET     -1
 
@@ -87,10 +87,10 @@ typedef enum OPTION_choice {
     OPT_VERIFY, OPT_NOENC, OPT_NODES, OPT_NOOUT, OPT_VERBOSE, OPT_UTF8,
     OPT_NAMEOPT, OPT_REQOPT, OPT_SUBJ, OPT_SUBJECT, OPT_TEXT,
     OPT_X509, OPT_X509V1, OPT_CA, OPT_CAKEY,
-    OPT_MULTIVALUE_RDN, OPT_DAYS, OPT_SET_SERIAL,
+    OPT_MULTIVALUE_RDN, OPT_NOT_BEFORE, OPT_NOT_AFTER, OPT_DAYS, OPT_SET_SERIAL,
     OPT_COPY_EXTENSIONS, OPT_EXTENSIONS, OPT_REQEXTS, OPT_ADDEXT,
     OPT_PRECERT, OPT_MD,
-    OPT_SECTION,
+    OPT_SECTION, OPT_QUIET,
     OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
@@ -127,7 +127,11 @@ const OPTIONS req_options[] = {
      "Print the subject of the output request or cert"},
     {"multivalue-rdn", OPT_MULTIVALUE_RDN, '-',
      "Deprecated; multi-valued RDNs support is always on."},
-    {"days", OPT_DAYS, 'p', "Number of days cert is valid for"},
+    {"not_before", OPT_NOT_BEFORE, 's',
+     "[CC]YYMMDDHHMMSSZ value for notBefore certificate field"},
+    {"not_after", OPT_NOT_AFTER, 's',
+     "[CC]YYMMDDHHMMSSZ value for notAfter certificate field, overrides -days"},
+    {"days", OPT_DAYS, 'p', "Number of days certificate is valid for"},
     {"set_serial", OPT_SET_SERIAL, 's', "Serial number to use"},
     {"copy_extensions", OPT_COPY_EXTENSIONS, 's',
      "copy extensions from request when using -x509"},
@@ -158,6 +162,7 @@ const OPTIONS req_options[] = {
     {"batch", OPT_BATCH, '-',
      "Do not ask anything during request generation"},
     {"verbose", OPT_VERBOSE, '-', "Verbose output"},
+    {"quiet", OPT_QUIET, '-', "Terse output"},
     {"noenc", OPT_NOENC, '-', "Don't encrypt private keys"},
     {"nodes", OPT_NODES, '-', "Don't encrypt private keys; deprecated"},
     {"noout", OPT_NOOUT, '-', "Do not output REQ"},
@@ -258,8 +263,9 @@ int req_main(int argc, char **argv)
     char *template = default_config_file, *keyout = NULL;
     const char *keyalg = NULL;
     OPTION_CHOICE o;
+    char *not_before = NULL, *not_after = NULL;
     int days = UNSET_DAYS;
-    int ret = 1, gen_x509 = 0, i = 0, newreq = 0, verbose = 0;
+    int ret = 1, gen_x509 = 0, i = 0, newreq = 0, verbose = 0, progress = 1;
     int informat = FORMAT_UNDEF, outformat = FORMAT_PEM, keyform = FORMAT_UNDEF;
     int modulus = 0, multirdn = 1, verify = 0, noout = 0, text = 0;
     int noenc = 0, newhdr = 0, subject = 0, pubkey = 0, precert = 0, x509v1 = 0;
@@ -389,6 +395,11 @@ int req_main(int argc, char **argv)
             break;
         case OPT_VERBOSE:
             verbose = 1;
+            progress = 1;
+            break;
+        case OPT_QUIET:
+            verbose = 0;
+            progress = 0;
             break;
         case OPT_UTF8:
             chtype = MBSTRING_UTF8;
@@ -417,9 +428,15 @@ int req_main(int argc, char **argv)
         case OPT_CAKEY:
             CAkeyfile = opt_arg();
             break;
+        case OPT_NOT_BEFORE:
+            not_before = opt_arg();
+            break;
+        case OPT_NOT_AFTER:
+            not_after = opt_arg();
+            break;
         case OPT_DAYS:
             days = atoi(opt_arg());
-            if (days < -1) {
+            if (days <= UNSET_DAYS) {
                 BIO_printf(bio_err, "%s: -days parameter arg must be >= -1\n",
                            prog);
                 goto end;
@@ -488,9 +505,13 @@ int req_main(int argc, char **argv)
 
     if (!gen_x509) {
         if (days != UNSET_DAYS)
-            BIO_printf(bio_err, "Ignoring -days without -x509; not generating a certificate\n");
+            BIO_printf(bio_err, "Warning: Ignoring -days without -x509; not generating a certificate\n");
+        if (not_before != NULL)
+            BIO_printf(bio_err, "Warning: Ignoring -not_before without -x509; not generating a certificate\n");
+        if (not_after != NULL)
+            BIO_printf(bio_err, "Warning: Ignoring -not_after without -x509; not generating a certificate\n");
         if (ext_copy == EXT_COPY_NONE)
-            BIO_printf(bio_err, "Ignoring -copy_extensions 'none' when -x509 is not given\n");
+            BIO_printf(bio_err, "Warning: Ignoring -copy_extensions 'none' when -x509 is not given\n");
     }
     if (infile == NULL) {
         if (gen_x509)
@@ -567,7 +588,7 @@ int req_main(int argc, char **argv)
         X509V3_CTX ctx;
 
         X509V3_set_ctx_test(&ctx);
-        X509V3_set_nconf(&ctx, addext_conf);
+        X509V3_set_nconf(&ctx, req_conf);
         if (!X509V3_EXT_add_nconf(addext_conf, &ctx, "default", NULL)) {
             BIO_printf(bio_err, "Error checking extensions defined using -addext\n");
             goto end;
@@ -652,10 +673,13 @@ int req_main(int argc, char **argv)
             }
         }
 
-        EVP_PKEY_CTX_set_cb(genctx, progress_cb);
         EVP_PKEY_CTX_set_app_data(genctx, bio_err);
+        if (progress)
+            EVP_PKEY_CTX_set_cb(genctx, progress_cb);
 
         pkey = app_keygen(genctx, keyalgstr, newkey_len, verbose);
+        if (pkey == NULL)
+            goto end;
 
         EVP_PKEY_CTX_free(genctx);
         genctx = NULL;
@@ -695,7 +719,7 @@ int req_main(int argc, char **argv)
             }
             goto end;
         }
-        BIO_free(out);
+        BIO_free_all(out);
         out = NULL;
         BIO_printf(bio_err, "-----\n");
     }
@@ -793,10 +817,11 @@ int req_main(int argc, char **argv)
 
             if (!X509_set_issuer_name(new_x509, issuer))
                 goto end;
-            if (days == UNSET_DAYS) {
+            if (days == UNSET_DAYS)
                 days = DEFAULT_DAYS;
-            }
-            if (!set_cert_times(new_x509, NULL, NULL, days))
+            else if (not_after != NULL)
+                BIO_printf(bio_err,"Warning: -not_after option overriding -days option\n");
+            if (!set_cert_times(new_x509, not_before, not_after, days, 1))
                 goto end;
             if (!X509_set_subject_name(new_x509, n_subj))
                 goto end;
@@ -909,9 +934,10 @@ int req_main(int argc, char **argv)
 
         if (i < 0)
             goto end;
-        if (i == 0)
+        if (i == 0) {
             BIO_printf(bio_err, "Certificate request self-signature verify failure\n");
-        else /* i > 0 */
+	    goto end;
+        } else /* i > 0 */
             BIO_printf(bio_out, "Certificate request self-signature verify OK\n");
     }
 
@@ -966,10 +992,10 @@ int req_main(int argc, char **argv)
         else
             tpubkey = X509_REQ_get0_pubkey(req);
         if (tpubkey == NULL) {
-            fprintf(stdout, "Modulus is unavailable\n");
+            BIO_puts(bio_err, "Modulus is unavailable\n");
             goto end;
         }
-        fprintf(stdout, "Modulus=");
+        BIO_puts(out, "Modulus=");
         if (EVP_PKEY_is_a(tpubkey, "RSA") || EVP_PKEY_is_a(tpubkey, "RSA-PSS")) {
             BIGNUM *n = NULL;
 
@@ -978,9 +1004,9 @@ int req_main(int argc, char **argv)
             BN_print(out, n);
             BN_free(n);
         } else {
-            fprintf(stdout, "Wrong Algorithm type");
+            BIO_puts(out, "Wrong Algorithm type");
         }
-        fprintf(stdout, "\n");
+        BIO_puts(out, "\n");
     }
 
     if (!noout && !gen_x509) {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -265,7 +265,7 @@ struct bio_dgram_pair_st {
     unsigned int no_trunc          : 1; /* Reads fail if they would truncate */
     unsigned int local_addr_enable : 1; /* Can use BIO_MSG->local? */
     unsigned int role              : 1; /* Determines lock order */
-    unsigned int fixed_size        : 1; /* Affects BIO_s_dgram_mem only */
+    unsigned int grows_on_write    : 1; /* Set for BIO_s_dgram_mem only */
 };
 
 #define MIN_BUF_LEN (1024)
@@ -279,8 +279,9 @@ static int dgram_pair_init(BIO *bio)
     if (b == NULL)
         return 0;
 
-    b->req_buf_len = 17*1024; /* default buffer size */
     b->mtu         = 1472;    /* conservative default MTU */
+    /* default buffer size */
+    b->req_buf_len = 9 * (sizeof(struct dgram_hdr) + b->mtu);
 
     b->lock = CRYPTO_THREAD_lock_new();
     if (b->lock == NULL) {
@@ -305,6 +306,8 @@ static int dgram_mem_init(BIO *bio)
         ERR_raise(ERR_LIB_BIO, ERR_R_BIO_LIB);
         return 0;
     }
+
+    b->grows_on_write = 1;
 
     bio->init = 1;
     return 1;
@@ -469,7 +472,7 @@ static int dgram_pair_ctrl_set_write_buf_size(BIO *bio, size_t len)
     }
 
     b->req_buf_len = len;
-    b->fixed_size = 1;
+    b->grows_on_write = 0;
     return 1;
 }
 
@@ -693,7 +696,7 @@ static long dgram_mem_ctrl(BIO *bio, int cmd, long num, void *ptr)
 
     /* BIO_dgram_get_local_addr_enable */
     case BIO_CTRL_DGRAM_GET_LOCAL_ADDR_ENABLE: /* Non-threadsafe */
-        ret = (long)dgram_pair_ctrl_get_local_addr_enable(bio);
+        *(int *)ptr = (int)dgram_pair_ctrl_get_local_addr_enable(bio);
         break;
 
     /* BIO_dgram_set_local_addr_enable */
@@ -1145,7 +1148,8 @@ static ossl_inline size_t compute_rbuf_growth(size_t target, size_t current)
 }
 
 /* Must hold local write lock */
-static size_t dgram_pair_write_inner(struct bio_dgram_pair_st *b, const uint8_t *buf, size_t sz)
+static size_t dgram_pair_write_inner(struct bio_dgram_pair_st *b,
+                                     const uint8_t *buf, size_t sz)
 {
     size_t total_written = 0;
 
@@ -1166,7 +1170,7 @@ static size_t dgram_pair_write_inner(struct bio_dgram_pair_st *b, const uint8_t 
         if (dst_len == 0) {
             size_t new_len;
 
-            if (!b->fixed_size) /* resizeable only unless size not set explicitly */
+            if (!b->grows_on_write) /* resize only if size not set explicitly */
                 break;
             /* increase the size */
             new_len = compute_rbuf_growth(b->req_buf_len + sz, b->req_buf_len);

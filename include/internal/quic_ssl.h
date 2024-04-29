@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -28,6 +28,8 @@ __owur int ossl_quic_accept(SSL *s);
 __owur int ossl_quic_connect(SSL *s);
 __owur int ossl_quic_read(SSL *s, void *buf, size_t len, size_t *readbytes);
 __owur int ossl_quic_peek(SSL *s, void *buf, size_t len, size_t *readbytes);
+__owur int ossl_quic_write_flags(SSL *s, const void *buf, size_t len,
+                                 uint64_t flags, size_t *written);
 __owur int ossl_quic_write(SSL *s, const void *buf, size_t len, size_t *written);
 __owur long ossl_quic_ctrl(SSL *s, int cmd, long larg, void *parg);
 __owur long ossl_quic_ctx_ctrl(SSL_CTX *ctx, int cmd, long larg, void *parg);
@@ -36,6 +38,7 @@ __owur long ossl_quic_ctx_callback_ctrl(SSL_CTX *ctx, int cmd, void (*fp) (void)
 __owur size_t ossl_quic_pending(const SSL *s);
 __owur int ossl_quic_key_update(SSL *s, int update_type);
 __owur int ossl_quic_get_key_update_type(const SSL *s);
+__owur const SSL_CIPHER *ossl_quic_get_cipher_by_char(const unsigned char *p);
 __owur int ossl_quic_num_ciphers(void);
 __owur const SSL_CIPHER *ossl_quic_get_cipher(unsigned int u);
 int ossl_quic_renegotiate_check(SSL *ssl, int initok);
@@ -57,6 +60,7 @@ __owur int ossl_quic_get_wpoll_descriptor(SSL *s, BIO_POLL_DESCRIPTOR *d);
 __owur int ossl_quic_get_net_read_desired(SSL *s);
 __owur int ossl_quic_get_net_write_desired(SSL *s);
 __owur int ossl_quic_get_error(const SSL *s, int i);
+__owur int ossl_quic_want(const SSL *s);
 __owur int ossl_quic_conn_get_blocking_mode(const SSL *s);
 __owur int ossl_quic_conn_set_blocking_mode(SSL *s, int blocking);
 __owur int ossl_quic_conn_shutdown(SSL *s, uint64_t flags,
@@ -73,6 +77,7 @@ __owur SSL *ossl_quic_conn_stream_new(SSL *s, uint64_t flags);
 __owur SSL *ossl_quic_get0_connection(SSL *s);
 __owur int ossl_quic_get_stream_type(SSL *s);
 __owur uint64_t ossl_quic_get_stream_id(SSL *s);
+__owur int ossl_quic_is_stream_local(SSL *s);
 __owur int ossl_quic_set_default_stream_mode(SSL *s, uint32_t mode);
 __owur SSL *ossl_quic_detach_stream(SSL *s);
 __owur int ossl_quic_attach_stream(SSL *conn, SSL *stream);
@@ -80,6 +85,10 @@ __owur int ossl_quic_set_incoming_stream_policy(SSL *s, int policy,
                                                 uint64_t aec);
 __owur SSL *ossl_quic_accept_stream(SSL *s, uint64_t flags);
 __owur size_t ossl_quic_get_accept_stream_queue_len(SSL *s);
+__owur int ossl_quic_get_value_uint(SSL *s, uint32_t class_, uint32_t id,
+                                    uint64_t *value);
+__owur int ossl_quic_set_value_uint(SSL *s, uint32_t class_, uint32_t id,
+                                    uint64_t value);
 
 __owur int ossl_quic_stream_reset(SSL *ssl,
                                   const SSL_STREAM_RESET_ARGS *args,
@@ -98,6 +107,9 @@ __owur int ossl_quic_get_conn_close_info(SSL *ssl,
 uint64_t ossl_quic_set_options(SSL *s, uint64_t opts);
 uint64_t ossl_quic_clear_options(SSL *s, uint64_t opts);
 uint64_t ossl_quic_get_options(const SSL *s);
+
+/* Modifies write buffer size for a stream. */
+__owur int ossl_quic_set_write_buffer_size(SSL *s, size_t size);
 
 /*
  * Used to override ossl_time_now() for debug purposes. While this may be
@@ -119,6 +131,20 @@ void ossl_quic_conn_force_assist_thread_wake(SSL *s);
 QUIC_CHANNEL *ossl_quic_conn_get_channel(SSL *s);
 
 int ossl_quic_has_pending(const SSL *s);
+int ossl_quic_get_shutdown(const SSL *s);
+
+/*
+ * Set qlog diagnostic title. String is copied internally on success and need
+ * not remain allocated. Only has any effect if logging has not already begun.
+ * For use by tests only. Setting this on a context affects any QCSO created
+ * after this is called but does not affect QCSOs already created from a
+ * context.
+ */
+int ossl_quic_set_diag_title(SSL_CTX *ctx, const char *title);
+
+/* APIs used by the polling infrastructure */
+int ossl_quic_conn_poll_events(SSL *ssl, uint64_t events, int do_tick,
+                               uint64_t *revents);
 
 # endif
 

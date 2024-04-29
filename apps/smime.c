@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1999-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -484,7 +484,8 @@ int smime_main(int argc, char **argv)
                              "recipient certificate file");
             if (cert == NULL)
                 goto end;
-            sk_X509_push(encerts, cert);
+            if (!sk_X509_push(encerts, cert))
+                goto end;
             cert = NULL;
             argv++;
         }

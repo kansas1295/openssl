@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -21,15 +21,6 @@
  * <openssl/e_os2.h> contains what we can justify to make visible to the
  * outside; this file e_os.h is not part of the exported interface.
  */
-
-/* ossl_static_assert_type_eq: gcc-only variable type static assertion */
-# if defined(__GNUC__) && !defined(__clang__)
-#  define ossl_static_assert_type_eq(type, x)                                \
-        _Static_assert((__builtin_types_compatible_p(type, __typeof__(x))),  \
-                        #x " type check failed, expected: " #type)
-# else
-#  define ossl_static_assert_type_eq(type, x)
-# endif
 
 # if defined(OPENSSL_SYS_VXWORKS) || defined(OPENSSL_SYS_UEFI)
 #  define NO_CHMOD
@@ -152,7 +143,7 @@ static __inline unsigned int _strlen31(const char *str)
 #     undef stdin
 #     undef stdout
 #     undef stderr
-FILE *__iob_func();
+FILE *__iob_func(void);
 #     define stdin  (&__iob_func()[0])
 #     define stdout (&__iob_func()[1])
 #     define stderr (&__iob_func()[2])
@@ -267,6 +258,7 @@ FILE *__iob_func();
 #   endif
 #   define unlink _unlink
 #   define fileno _fileno
+#   define isatty _isatty
 #  endif
 # else
 #  include <strings.h>
@@ -304,12 +296,12 @@ struct servent *getservbyname(const char *name, const char *proto);
 #  define gethostbyname(name)                gethostbyname((char*)name)
 #  define ioctlsocket(a,b,c)	ioctl(a,b,c)
 #  ifdef NO_GETPID
-inline int nssgetpid();
+inline int nssgetpid(void);
 #   ifndef NSSGETPID_MACRO
 #    define NSSGETPID_MACRO
 #    include <cextdecs.h(PROCESSHANDLE_GETMINE_)>
 #    include <cextdecs.h(PROCESSHANDLE_DECOMPOSE_)>
-       inline int nssgetpid()
+       inline int nssgetpid(void)
        {
          short phandle[10]={0};
          union pseudo_pid {

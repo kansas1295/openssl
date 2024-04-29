@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2005-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -130,6 +130,17 @@ void dtls1_clear_sent_buffer(SSL_CONNECTION *s)
 
     while ((item = pqueue_pop(s->d1->sent_messages)) != NULL) {
         frag = (hm_fragment *)item->data;
+
+        if (frag->msg_header.is_ccs
+                && frag->msg_header.saved_retransmit_state.wrlmethod != NULL
+                && s->rlayer.wrl != frag->msg_header.saved_retransmit_state.wrl) {
+            /*
+             * If we're freeing the CCS then we're done with the old wrl and it
+             * can bee freed
+             */
+            frag->msg_header.saved_retransmit_state.wrlmethod->free(frag->msg_header.saved_retransmit_state.wrl);
+        }
+
         dtls1_hm_fragment_free(frag);
         pitem_free(item);
     }
@@ -143,15 +154,15 @@ void dtls1_free(SSL *ssl)
     if (s == NULL)
         return;
 
-    DTLS_RECORD_LAYER_free(&s->rlayer);
-
-    ssl3_free(ssl);
-
     if (s->d1 != NULL) {
         dtls1_clear_queues(s);
         pqueue_free(s->d1->buffered_messages);
         pqueue_free(s->d1->sent_messages);
     }
+
+    DTLS_RECORD_LAYER_free(&s->rlayer);
+
+    ssl3_free(ssl);
 
     OPENSSL_free(s->d1);
     s->d1 = NULL;
@@ -256,7 +267,7 @@ long dtls1_ctrl(SSL *ssl, int cmd, long larg, void *parg)
     return ret;
 }
 
-static void dtls1_bio_set_next_timeout(BIO * bio, const DTLS1_STATE *d1)
+static void dtls1_bio_set_next_timeout(BIO *bio, const DTLS1_STATE *d1)
 {
     struct timeval tv = ossl_time_to_timeval(d1->next_timeout);
 
@@ -411,7 +422,7 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
     const unsigned char *data;
     unsigned char *buf = NULL, *wbuf;
     size_t fragoff, fraglen, msglen;
-    unsigned int rectype, versmajor, msgseq, msgtype, clientvers, cookielen;
+    unsigned int rectype, versmajor, versminor, msgseq, msgtype, clientvers, cookielen;
     BIO *rbio, *wbio;
     BIO_ADDR *tmpclient = NULL;
     PACKET pkt, msgpkt, msgpayload, session, cookiepkt;
@@ -496,16 +507,17 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
             goto end;
         }
 
-        if (s->msg_callback)
-            s->msg_callback(0, 0, SSL3_RT_HEADER, buf,
-                            DTLS1_RT_HEADER_LENGTH, ssl, s->msg_callback_arg);
-
         /* Get the record header */
         if (!PACKET_get_1(&pkt, &rectype)
-            || !PACKET_get_1(&pkt, &versmajor)) {
+            || !PACKET_get_1(&pkt, &versmajor)
+            || !PACKET_get_1(&pkt, &versminor)) {
             ERR_raise(ERR_LIB_SSL, SSL_R_LENGTH_MISMATCH);
             goto end;
         }
+
+        if (s->msg_callback)
+            s->msg_callback(0, (versmajor << 8) | versminor, SSL3_RT_HEADER, buf,
+                            DTLS1_RT_HEADER_LENGTH, ssl, s->msg_callback_arg);
 
         if (rectype != SSL3_RT_HANDSHAKE) {
             ERR_raise(ERR_LIB_SSL, SSL_R_UNEXPECTED_MESSAGE);
@@ -521,9 +533,8 @@ int DTLSv1_listen(SSL *ssl, BIO_ADDR *client)
             goto end;
         }
 
-        if (!PACKET_forward(&pkt, 1)
-            /* Save the sequence number: 64 bits, with top 2 bytes = epoch */
-            || !PACKET_copy_bytes(&pkt, seq, SEQ_NUM_SIZE)
+        /* Save the sequence number: 64 bits, with top 2 bytes = epoch */
+        if (!PACKET_copy_bytes(&pkt, seq, SEQ_NUM_SIZE)
             || !PACKET_get_length_prefixed_2(&pkt, &msgpkt)) {
             ERR_raise(ERR_LIB_SSL, SSL_R_LENGTH_MISMATCH);
             goto end;

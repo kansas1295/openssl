@@ -67,8 +67,8 @@ static int test_ncid_frame(int fail)
     if (!TEST_ptr(cctx))
         goto err;
 
-    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, cert, privkey, 0,
-                                             &qtserv, &cssl, &fault)))
+    if (!TEST_true(qtest_create_quic_objects(NULL, cctx, NULL, cert, privkey, 0,
+                                             &qtserv, &cssl, &fault, NULL)))
         goto err;
 
     if (!TEST_true(qtest_create_quic_connection(qtserv, cssl)))

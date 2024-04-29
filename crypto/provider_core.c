@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -28,7 +28,6 @@
 #include "internal/refcount.h"
 #include "internal/bio.h"
 #include "internal/core.h"
-#include "internal/decoder.h"
 #include "provider_local.h"
 #include "crypto/context.h"
 #ifndef FIPS_MODULE
@@ -396,7 +395,7 @@ int ossl_provider_info_add_to_store(OSSL_LIB_CTX *libctx,
 }
 
 OSSL_PROVIDER *ossl_provider_find(OSSL_LIB_CTX *libctx, const char *name,
-                                  int noconfig)
+                                  ossl_unused int noconfig)
 {
     struct provider_store_st *store = NULL;
     OSSL_PROVIDER *prov = NULL;
@@ -405,7 +404,7 @@ OSSL_PROVIDER *ossl_provider_find(OSSL_LIB_CTX *libctx, const char *name,
         OSSL_PROVIDER tmpl = { 0, };
         int i;
 
-#ifndef FIPS_MODULE
+#if !defined(FIPS_MODULE) && !defined(OPENSSL_NO_AUTOLOAD_CONFIG)
         /*
          * Make sure any providers are loaded from config before we try to find
          * them.
@@ -447,13 +446,11 @@ static OSSL_PROVIDER *provider_new(const char *name,
         OPENSSL_free(prov);
         return NULL;
     }
-#ifndef HAVE_ATOMICS
     if ((prov->activatecnt_lock = CRYPTO_THREAD_lock_new()) == NULL) {
         ossl_provider_free(prov);
         ERR_raise(ERR_LIB_CRYPTO, ERR_R_CRYPTO_LIB);
         return NULL;
     }
-#endif
 
     if ((prov->opbits_lock = CRYPTO_THREAD_lock_new()) == NULL
         || (prov->flag_lock = CRYPTO_THREAD_lock_new()) == NULL
@@ -519,7 +516,7 @@ static int provider_free_intern(OSSL_PROVIDER *prov, int deactivate)
  */
 OSSL_PROVIDER *ossl_provider_new(OSSL_LIB_CTX *libctx, const char *name,
                                  OSSL_provider_init_fn *init_function,
-                                 int noconfig)
+                                 OSSL_PARAM *params, int noconfig)
 {
     struct provider_store_st *store = NULL;
     OSSL_PROVIDER_INFO template;
@@ -541,7 +538,7 @@ OSSL_PROVIDER *ossl_provider_new(OSSL_LIB_CTX *libctx, const char *name,
             }
         }
         if (p->name == NULL) {
-            /* Check if this is a user added builtin provider */
+            /* Check if this is a user added provider */
             if (!CRYPTO_THREAD_read_lock(store->lock))
                 return NULL;
             for (i = 0, p = store->provinfo; i < store->numprovinfo; p++, i++) {
@@ -556,9 +553,37 @@ OSSL_PROVIDER *ossl_provider_new(OSSL_LIB_CTX *libctx, const char *name,
         template.init = init_function;
     }
 
+    if (params != NULL) {
+        int i;
+
+        template.parameters = sk_INFOPAIR_new_null();
+        if (template.parameters == NULL)
+            return NULL;
+
+        for (i = 0; params[i].key != NULL; i++) {
+            if (params[i].data_type != OSSL_PARAM_UTF8_STRING)
+                continue;
+            if (ossl_provider_info_add_parameter(&template, params[i].key,
+                                                 (char *)params[i].data) <= 0) {
+                sk_INFOPAIR_pop_free(template.parameters, infopair_free);
+                return NULL;
+            }
+        }
+    }
+
     /* provider_new() generates an error, so no need here */
-    if ((prov = provider_new(name, template.init, template.parameters)) == NULL)
+    prov = provider_new(name, template.init, template.parameters);
+
+    if (params != NULL) /* We copied the parameters, let's free them */
+        sk_INFOPAIR_pop_free(template.parameters, infopair_free);
+
+    if (prov == NULL)
         return NULL;
+
+    if (!ossl_provider_set_module_path(prov, template.path)) {
+        ossl_provider_free(prov);
+        return NULL;
+    }
 
     prov->libctx = libctx;
 #ifndef FIPS_MODULE
@@ -722,9 +747,7 @@ void ossl_provider_free(OSSL_PROVIDER *prov)
             sk_INFOPAIR_pop_free(prov->parameters, infopair_free);
             CRYPTO_THREAD_lock_free(prov->opbits_lock);
             CRYPTO_THREAD_lock_free(prov->flag_lock);
-#ifndef HAVE_ATOMICS
             CRYPTO_THREAD_lock_free(prov->activatecnt_lock);
-#endif
             CRYPTO_FREE_REF(&prov->refcnt);
             OPENSSL_free(prov);
         }
@@ -950,44 +973,46 @@ static int provider_init(OSSL_PROVIDER *prov)
     prov->provctx = tmp_provctx;
     prov->dispatch = provider_dispatch;
 
-    for (; provider_dispatch->function_id != 0; provider_dispatch++) {
-        switch (provider_dispatch->function_id) {
-        case OSSL_FUNC_PROVIDER_TEARDOWN:
-            prov->teardown =
-                OSSL_FUNC_provider_teardown(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_GETTABLE_PARAMS:
-            prov->gettable_params =
-                OSSL_FUNC_provider_gettable_params(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_GET_PARAMS:
-            prov->get_params =
-                OSSL_FUNC_provider_get_params(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_SELF_TEST:
-            prov->self_test =
-                OSSL_FUNC_provider_self_test(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_GET_CAPABILITIES:
-            prov->get_capabilities =
-                OSSL_FUNC_provider_get_capabilities(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_QUERY_OPERATION:
-            prov->query_operation =
-                OSSL_FUNC_provider_query_operation(provider_dispatch);
-            break;
-        case OSSL_FUNC_PROVIDER_UNQUERY_OPERATION:
-            prov->unquery_operation =
-                OSSL_FUNC_provider_unquery_operation(provider_dispatch);
-            break;
+    if (provider_dispatch != NULL) {
+        for (; provider_dispatch->function_id != 0; provider_dispatch++) {
+            switch (provider_dispatch->function_id) {
+            case OSSL_FUNC_PROVIDER_TEARDOWN:
+                prov->teardown =
+                    OSSL_FUNC_provider_teardown(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_GETTABLE_PARAMS:
+                prov->gettable_params =
+                    OSSL_FUNC_provider_gettable_params(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_GET_PARAMS:
+                prov->get_params =
+                    OSSL_FUNC_provider_get_params(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_SELF_TEST:
+                prov->self_test =
+                    OSSL_FUNC_provider_self_test(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_GET_CAPABILITIES:
+                prov->get_capabilities =
+                    OSSL_FUNC_provider_get_capabilities(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_QUERY_OPERATION:
+                prov->query_operation =
+                    OSSL_FUNC_provider_query_operation(provider_dispatch);
+                break;
+            case OSSL_FUNC_PROVIDER_UNQUERY_OPERATION:
+                prov->unquery_operation =
+                    OSSL_FUNC_provider_unquery_operation(provider_dispatch);
+                break;
 #ifndef OPENSSL_NO_ERR
 # ifndef FIPS_MODULE
-        case OSSL_FUNC_PROVIDER_GET_REASON_STRINGS:
-            p_get_reason_strings =
-                OSSL_FUNC_provider_get_reason_strings(provider_dispatch);
-            break;
+            case OSSL_FUNC_PROVIDER_GET_REASON_STRINGS:
+                p_get_reason_strings =
+                    OSSL_FUNC_provider_get_reason_strings(provider_dispatch);
+                break;
 # endif
 #endif
+            }
         }
     }
 
@@ -1387,7 +1412,7 @@ int ossl_provider_doall_activated(OSSL_LIB_CTX *ctx,
     struct provider_store_st *store = get_provider_store(ctx);
     STACK_OF(OSSL_PROVIDER) *provs = NULL;
 
-#ifndef FIPS_MODULE
+#if !defined(FIPS_MODULE) && !defined(OPENSSL_NO_AUTOLOAD_CONFIG)
     /*
      * Make sure any providers are loaded from config before we try to use
      * them.
@@ -1910,10 +1935,14 @@ OSSL_FUNC_BIO_free_fn ossl_core_bio_free;
 OSSL_FUNC_BIO_vprintf_fn ossl_core_bio_vprintf;
 OSSL_FUNC_BIO_vsnprintf_fn BIO_vsnprintf;
 static OSSL_FUNC_self_test_cb_fn core_self_test_get_callback;
-OSSL_FUNC_get_entropy_fn ossl_rand_get_entropy;
-OSSL_FUNC_cleanup_entropy_fn ossl_rand_cleanup_entropy;
-OSSL_FUNC_get_nonce_fn ossl_rand_get_nonce;
-OSSL_FUNC_cleanup_nonce_fn ossl_rand_cleanup_nonce;
+static OSSL_FUNC_get_entropy_fn rand_get_entropy;
+static OSSL_FUNC_get_user_entropy_fn rand_get_user_entropy;
+static OSSL_FUNC_cleanup_entropy_fn rand_cleanup_entropy;
+static OSSL_FUNC_cleanup_user_entropy_fn rand_cleanup_user_entropy;
+static OSSL_FUNC_get_nonce_fn rand_get_nonce;
+static OSSL_FUNC_get_user_nonce_fn rand_get_user_nonce;
+static OSSL_FUNC_cleanup_nonce_fn rand_cleanup_nonce;
+static OSSL_FUNC_cleanup_user_nonce_fn rand_cleanup_user_nonce;
 #endif
 OSSL_FUNC_CRYPTO_malloc_fn CRYPTO_malloc;
 OSSL_FUNC_CRYPTO_zalloc_fn CRYPTO_zalloc;
@@ -2074,6 +2103,68 @@ static void core_self_test_get_callback(OPENSSL_CORE_CTX *libctx,
     OSSL_SELF_TEST_get_callback((OSSL_LIB_CTX *)libctx, cb, cbarg);
 }
 
+static size_t rand_get_entropy(const OSSL_CORE_HANDLE *handle,
+                               unsigned char **pout, int entropy,
+                               size_t min_len, size_t max_len)
+{
+    return ossl_rand_get_entropy((OSSL_LIB_CTX *)core_get_libctx(handle),
+                                 pout, entropy, min_len, max_len);
+}
+
+static size_t rand_get_user_entropy(const OSSL_CORE_HANDLE *handle,
+                                    unsigned char **pout, int entropy,
+                                    size_t min_len, size_t max_len)
+{
+    return ossl_rand_get_user_entropy((OSSL_LIB_CTX *)core_get_libctx(handle),
+                                      pout, entropy, min_len, max_len);
+}
+
+static void rand_cleanup_entropy(const OSSL_CORE_HANDLE *handle,
+                                 unsigned char *buf, size_t len)
+{
+    ossl_rand_cleanup_entropy((OSSL_LIB_CTX *)core_get_libctx(handle),
+                              buf, len);
+}
+
+static void rand_cleanup_user_entropy(const OSSL_CORE_HANDLE *handle,
+                                      unsigned char *buf, size_t len)
+{
+    ossl_rand_cleanup_user_entropy((OSSL_LIB_CTX *)core_get_libctx(handle),
+                                   buf, len);
+}
+
+static size_t rand_get_nonce(const OSSL_CORE_HANDLE *handle,
+                             unsigned char **pout,
+                             size_t min_len, size_t max_len,
+                             const void *salt, size_t salt_len)
+{
+    return ossl_rand_get_nonce((OSSL_LIB_CTX *)core_get_libctx(handle),
+                               pout, min_len, max_len, salt, salt_len);
+}
+
+static size_t rand_get_user_nonce(const OSSL_CORE_HANDLE *handle,
+                                  unsigned char **pout,
+                                  size_t min_len, size_t max_len,
+                                  const void *salt, size_t salt_len)
+{
+    return ossl_rand_get_user_nonce((OSSL_LIB_CTX *)core_get_libctx(handle),
+                                    pout, min_len, max_len, salt, salt_len);
+}
+
+static void rand_cleanup_nonce(const OSSL_CORE_HANDLE *handle,
+                               unsigned char *buf, size_t len)
+{
+    ossl_rand_cleanup_nonce((OSSL_LIB_CTX *)core_get_libctx(handle),
+                            buf, len);
+}
+
+static void rand_cleanup_user_nonce(const OSSL_CORE_HANDLE *handle,
+                               unsigned char *buf, size_t len)
+{
+    ossl_rand_cleanup_user_nonce((OSSL_LIB_CTX *)core_get_libctx(handle),
+                                 buf, len);
+}
+
 static const char *core_provider_get0_name(const OSSL_CORE_HANDLE *prov)
 {
     return OSSL_PROVIDER_get0_name((const OSSL_PROVIDER *)prov);
@@ -2167,10 +2258,14 @@ static const OSSL_DISPATCH core_dispatch_[] = {
     { OSSL_FUNC_BIO_VPRINTF, (void (*)(void))ossl_core_bio_vprintf },
     { OSSL_FUNC_BIO_VSNPRINTF, (void (*)(void))BIO_vsnprintf },
     { OSSL_FUNC_SELF_TEST_CB, (void (*)(void))core_self_test_get_callback },
-    { OSSL_FUNC_GET_ENTROPY, (void (*)(void))ossl_rand_get_entropy },
-    { OSSL_FUNC_CLEANUP_ENTROPY, (void (*)(void))ossl_rand_cleanup_entropy },
-    { OSSL_FUNC_GET_NONCE, (void (*)(void))ossl_rand_get_nonce },
-    { OSSL_FUNC_CLEANUP_NONCE, (void (*)(void))ossl_rand_cleanup_nonce },
+    { OSSL_FUNC_GET_ENTROPY, (void (*)(void))rand_get_entropy },
+    { OSSL_FUNC_GET_USER_ENTROPY, (void (*)(void))rand_get_user_entropy },
+    { OSSL_FUNC_CLEANUP_ENTROPY, (void (*)(void))rand_cleanup_entropy },
+    { OSSL_FUNC_CLEANUP_USER_ENTROPY, (void (*)(void))rand_cleanup_user_entropy },
+    { OSSL_FUNC_GET_NONCE, (void (*)(void))rand_get_nonce },
+    { OSSL_FUNC_GET_USER_NONCE, (void (*)(void))rand_get_user_nonce },
+    { OSSL_FUNC_CLEANUP_NONCE, (void (*)(void))rand_cleanup_nonce },
+    { OSSL_FUNC_CLEANUP_USER_NONCE, (void (*)(void))rand_cleanup_user_nonce },
 #endif
     { OSSL_FUNC_CRYPTO_MALLOC, (void (*)(void))CRYPTO_malloc },
     { OSSL_FUNC_CRYPTO_ZALLOC, (void (*)(void))CRYPTO_zalloc },

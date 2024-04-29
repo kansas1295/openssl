@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -410,8 +410,8 @@ static const OSSL_ALGORITHM fips_keyexch[] = {
 #ifndef OPENSSL_NO_EC
     { PROV_NAMES_ECDH, FIPS_DEFAULT_PROPERTIES, ossl_ecdh_keyexch_functions },
 # ifndef OPENSSL_NO_ECX
-    { PROV_NAMES_X25519, FIPS_DEFAULT_PROPERTIES, ossl_x25519_keyexch_functions },
-    { PROV_NAMES_X448, FIPS_DEFAULT_PROPERTIES, ossl_x448_keyexch_functions },
+    { PROV_NAMES_X25519, FIPS_UNAPPROVED_PROPERTIES, ossl_x25519_keyexch_functions },
+    { PROV_NAMES_X448, FIPS_UNAPPROVED_PROPERTIES, ossl_x448_keyexch_functions },
 # endif
 #endif
     { PROV_NAMES_TLS1_PRF, FIPS_DEFAULT_PROPERTIES,
@@ -471,9 +471,9 @@ static const OSSL_ALGORITHM fips_keymgmt[] = {
     { PROV_NAMES_EC, FIPS_DEFAULT_PROPERTIES, ossl_ec_keymgmt_functions,
       PROV_DESCS_EC },
 # ifndef OPENSSL_NO_ECX
-    { PROV_NAMES_X25519, FIPS_DEFAULT_PROPERTIES, ossl_x25519_keymgmt_functions,
+    { PROV_NAMES_X25519, FIPS_UNAPPROVED_PROPERTIES, ossl_x25519_keymgmt_functions,
       PROV_DESCS_X25519 },
-    { PROV_NAMES_X448, FIPS_DEFAULT_PROPERTIES, ossl_x448_keymgmt_functions,
+    { PROV_NAMES_X448, FIPS_UNAPPROVED_PROPERTIES, ossl_x448_keymgmt_functions,
       PROV_DESCS_X448 },
     { PROV_NAMES_ED25519, FIPS_UNAPPROVED_PROPERTIES, ossl_ed25519_keymgmt_functions,
       PROV_DESCS_ED25519 },
@@ -697,20 +697,22 @@ int OSSL_provider_init_int(const OSSL_CORE_HANDLE *handle,
 
     /*  Create a context. */
     if ((*provctx = ossl_prov_ctx_new()) == NULL
-        || (libctx = OSSL_LIB_CTX_new()) == NULL) {
-        /*
-         * We free libctx separately here and only here because it hasn't
-         * been attached to *provctx.  All other error paths below rely
-         * solely on fips_teardown.
-         */
-        OSSL_LIB_CTX_free(libctx);
+            || (libctx = OSSL_LIB_CTX_new()) == NULL)
         goto err;
-    }
 
     if ((fgbl = ossl_lib_ctx_get_data(libctx, OSSL_LIB_CTX_FIPS_PROV_INDEX)) == NULL)
         goto err;
 
     fgbl->handle = handle;
+
+    /*
+     * We need to register this thread to receive thread lifecycle callbacks.
+     * This wouldn't matter if the current thread is also the same thread that
+     * closes the FIPS provider down. But if that happens on a different thread
+     * then memory leaks could otherwise occur.
+     */
+    if (!ossl_thread_register_fips(libctx))
+        goto err;
 
     /*
      * We did initial set up of selftest_params in a local copy, because we

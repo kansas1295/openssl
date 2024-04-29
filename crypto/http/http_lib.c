@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2001-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -118,7 +118,7 @@ int OSSL_parse_url(const char *url, char **pscheme, char **puser, char **phost,
         port = ++p;
     /* remaining port spec handling is also done for the default values */
     /* make sure a decimal port number is given */
-    if (!sscanf(port, "%u", &portnum) || portnum > 65535) {
+    if (sscanf(port, "%u", &portnum) <= 0 || portnum > 65535) {
         ERR_raise_data(ERR_LIB_HTTP, HTTP_R_INVALID_PORT_NUMBER, "%s", port);
         goto err;
     }

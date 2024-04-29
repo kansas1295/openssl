@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -52,13 +52,13 @@ struct evp_test_method_st {
     /* Name of test as it appears in file */
     const char *name;
     /* Initialise test for "alg" */
-    int (*init) (EVP_TEST * t, const char *alg);
+    int (*init) (EVP_TEST *t, const char *alg);
     /* Clean up method */
-    void (*cleanup) (EVP_TEST * t);
+    void (*cleanup) (EVP_TEST *t);
     /* Test specific name value pair processing */
-    int (*parse) (EVP_TEST * t, const char *name, const char *value);
+    int (*parse) (EVP_TEST *t, const char *name, const char *value);
     /* Run the test itself */
-    int (*run_test) (EVP_TEST * t);
+    int (*run_test) (EVP_TEST *t);
 };
 
 /* Linked list of named keys. */
@@ -72,10 +72,14 @@ typedef enum OPTION_choice {
     OPT_ERR = -1,
     OPT_EOF = 0,
     OPT_CONFIG_FILE,
+    OPT_IN_PLACE,
+    OPT_PROVIDER_NAME,
+    OPT_PROV_PROPQUERY,
     OPT_TEST_ENUM
 } OPTION_CHOICE;
 
 static OSSL_PROVIDER *prov_null = NULL;
+static OSSL_PROVIDER *libprov = NULL;
 static OSSL_LIB_CTX *libctx = NULL;
 
 /* List of public and private keys */
@@ -109,6 +113,19 @@ static int memory_err_compare(EVP_TEST *t, const char *err,
     if (!r)
         t->err = err;
     return r;
+}
+
+/* Option specific for evp test */
+static int process_mode_in_place;
+static const char *propquery = NULL;
+
+static int evp_test_process_mode(char *mode)
+{
+    if (strcmp(mode, "in_place") == 0)
+        return 1;
+    else if (strcmp(mode, "both") == 0)
+        return 0;
+    return -1;
 }
 
 /*
@@ -338,6 +355,8 @@ typedef struct digest_data_st {
     int pad_type;
     /* XOF mode? */
     int xof;
+    /* Size for variable output length but non-XOF */
+    size_t digest_size;
 } DIGEST_DATA;
 
 static int digest_test_init(EVP_TEST *t, const char *alg)
@@ -352,7 +371,7 @@ static int digest_test_init(EVP_TEST *t, const char *alg)
         return 1;
     }
 
-    if ((digest = fetched_digest = EVP_MD_fetch(libctx, alg, NULL)) == NULL
+    if ((digest = fetched_digest = EVP_MD_fetch(libctx, alg, propquery)) == NULL
         && (digest = EVP_get_digestbyname(alg)) == NULL)
         return 0;
     if (!TEST_ptr(mdat = OPENSSL_zalloc(sizeof(*mdat))))
@@ -393,6 +412,15 @@ static int digest_test_parse(EVP_TEST *t,
         return (mdata->pad_type = atoi(value)) > 0;
     if (strcmp(keyword, "XOF") == 0)
         return (mdata->xof = atoi(value)) > 0;
+    if (strcmp(keyword, "OutputSize") == 0) {
+        int sz;
+
+        sz = atoi(value);
+        if (sz < 0)
+            return -1;
+        mdata->digest_size = sz;
+        return 1;
+    }
     return 0;
 }
 
@@ -430,7 +458,7 @@ static int digest_test_run(EVP_TEST *t)
     unsigned int got_len;
     size_t size = 0;
     int xof = 0;
-    OSSL_PARAM params[3], *p = &params[0];
+    OSSL_PARAM params[4], *p = &params[0];
 
     t->err = "TEST_FAILURE";
     if (!TEST_ptr(mctx = EVP_MD_CTX_new()))
@@ -445,6 +473,10 @@ static int digest_test_run(EVP_TEST *t)
         xof |= 1;
         *p++ = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_XOFLEN,
                                            &expected->output_len);
+    }
+    if (expected->digest_size > 0) {
+        *p++ = OSSL_PARAM_construct_size_t(OSSL_DIGEST_PARAM_SIZE,
+                                           &expected->digest_size);
     }
     if (expected->pad_type > 0)
         *p++ = OSSL_PARAM_construct_int(OSSL_DIGEST_PARAM_PAD_TYPE,
@@ -581,7 +613,7 @@ static int cipher_test_init(EVP_TEST *t, const char *alg)
     }
 
     ERR_set_mark();
-    if ((cipher = fetched_cipher = EVP_CIPHER_fetch(libctx, alg, NULL)) == NULL
+    if ((cipher = fetched_cipher = EVP_CIPHER_fetch(libctx, alg, propquery)) == NULL
         && (cipher = EVP_get_cipherbyname(alg)) == NULL) {
         /* a stitched cipher might not be available */
         if (strstr(alg, "HMAC") != NULL) {
@@ -713,8 +745,8 @@ static int cipher_test_parse(EVP_TEST *t, const char *keyword,
     return 0;
 }
 
-static int cipher_test_enc(EVP_TEST *t, int enc,
-                           size_t out_misalign, size_t inp_misalign, int frag)
+static int cipher_test_enc(EVP_TEST *t, int enc, size_t out_misalign,
+                           size_t inp_misalign, int frag, int in_place)
 {
     CIPHER_DATA *expected = t->data;
     unsigned char *in, *expected_out, *tmp = NULL;
@@ -722,6 +754,7 @@ static int cipher_test_enc(EVP_TEST *t, int enc,
     int ok = 0, tmplen, chunklen, tmpflen, i;
     EVP_CIPHER_CTX *ctx_base = NULL;
     EVP_CIPHER_CTX *ctx = NULL, *duped;
+    int fips_dupctx_supported = fips_provider_version_ge(libctx, 3, 2, 0);
 
     t->err = "TEST_FAILURE";
     if (!TEST_ptr(ctx_base = EVP_CIPHER_CTX_new()))
@@ -740,7 +773,7 @@ static int cipher_test_enc(EVP_TEST *t, int enc,
         expected_out = expected->plaintext;
         out_len = expected->plaintext_len;
     }
-    if (inp_misalign == (size_t)-1) {
+    if (in_place == 1) {
         /* Exercise in-place encryption */
         tmp = OPENSSL_malloc(out_misalign + in_len + 2 * EVP_MAX_BLOCK_LENGTH);
         if (!tmp)
@@ -852,18 +885,35 @@ static int cipher_test_enc(EVP_TEST *t, int enc,
 
     /* Test that the cipher dup functions correctly if it is supported */
     ERR_set_mark();
-    if (EVP_CIPHER_CTX_copy(ctx, ctx_base)) {
-        EVP_CIPHER_CTX_free(ctx_base);
-        ctx_base = NULL;
-    } else {
+    if (!EVP_CIPHER_CTX_copy(ctx, ctx_base)) {
+        if (fips_dupctx_supported) {
+            TEST_info("Doing a copy of Cipher %s Fails!\n",
+                      EVP_CIPHER_get0_name(expected->cipher));
+            ERR_print_errors_fp(stderr);
+            goto err;
+        } else {
+            TEST_info("Allowing copy fail as an old fips provider is in use.");
+        }
         EVP_CIPHER_CTX_free(ctx);
         ctx = ctx_base;
+    } else {
+        EVP_CIPHER_CTX_free(ctx_base);
+        ctx_base = NULL;
     }
     /* Likewise for dup */
     duped = EVP_CIPHER_CTX_dup(ctx);
     if (duped != NULL) {
         EVP_CIPHER_CTX_free(ctx);
         ctx = duped;
+    } else {
+        if (fips_dupctx_supported) {
+            TEST_info("Doing a dup of Cipher %s Fails!\n",
+                      EVP_CIPHER_get0_name(expected->cipher));
+            ERR_print_errors_fp(stderr);
+            goto err;
+        } else {
+            TEST_info("Allowing dup fail as an old fips provider is in use.");
+        }
     }
     ERR_pop_to_mark();
 
@@ -1053,17 +1103,35 @@ static int cipher_test_enc(EVP_TEST *t, int enc,
     return ok;
 }
 
+/*
+ * XTS, SIV, CCM, stitched ciphers and Wrap modes have special
+ * requirements about input lengths so we don't fragment for those
+ */
+static int cipher_test_valid_fragmentation(CIPHER_DATA *cdat)
+{
+    return (cdat->aead == EVP_CIPH_CCM_MODE
+            || cdat->aead == EVP_CIPH_CBC_MODE
+            || (cdat->aead == -1
+                && EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_STREAM_CIPHER)
+            || ((EVP_CIPHER_get_flags(cdat->cipher) & EVP_CIPH_FLAG_CTS) != 0)
+            || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_SIV_MODE
+            || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_GCM_SIV_MODE
+            || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_XTS_MODE
+            || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_WRAP_MODE) ? 0 : 1;
+}
+
 static int cipher_test_run(EVP_TEST *t)
 {
     CIPHER_DATA *cdat = t->data;
-    int rv, frag = 0;
+    int rv, frag, fragmax, in_place;
     size_t out_misalign, inp_misalign;
 
+    TEST_info("RUNNING TEST FOR CIPHER %s\n", EVP_CIPHER_get0_name(cdat->cipher));
     if (!cdat->key) {
         t->err = "NO_KEY";
         return 0;
     }
-    if (!cdat->iv && EVP_CIPHER_get_iv_length(cdat->cipher)) {
+    if (!cdat->iv && EVP_CIPHER_get_iv_length(cdat->cipher) > 0) {
         /* IV is optional and usually omitted in wrap mode */
         if (EVP_CIPHER_get_mode(cdat->cipher) != EVP_CIPH_WRAP_MODE) {
             t->err = "NO_IV";
@@ -1074,62 +1142,56 @@ static int cipher_test_run(EVP_TEST *t)
         t->err = "NO_TAG";
         return 0;
     }
-    for (out_misalign = 0; out_misalign <= 1;) {
-        static char aux_err[64];
-        t->aux_err = aux_err;
-        for (inp_misalign = (size_t)-1; inp_misalign != 2; inp_misalign++) {
-            if (inp_misalign == (size_t)-1) {
-                /* kludge: inp_misalign == -1 means "exercise in-place" */
-                BIO_snprintf(aux_err, sizeof(aux_err),
-                             "%s in-place, %sfragmented",
-                             out_misalign ? "misaligned" : "aligned",
-                             frag ? "" : "not ");
-            } else {
-                BIO_snprintf(aux_err, sizeof(aux_err),
-                             "%s output and %s input, %sfragmented",
-                             out_misalign ? "misaligned" : "aligned",
-                             inp_misalign ? "misaligned" : "aligned",
-                             frag ? "" : "not ");
-            }
-            if (cdat->enc) {
-                rv = cipher_test_enc(t, 1, out_misalign, inp_misalign, frag);
-                /* Not fatal errors: return */
-                if (rv != 1) {
-                    if (rv < 0)
-                        return 0;
-                    return 1;
-                }
-            }
-            if (cdat->enc != 1) {
-                rv = cipher_test_enc(t, 0, out_misalign, inp_misalign, frag);
-                /* Not fatal errors: return */
-                if (rv != 1) {
-                    if (rv < 0)
-                        return 0;
-                    return 1;
-                }
-            }
-        }
 
-        if (out_misalign == 1 && frag == 0) {
-            /*
-             * XTS, SIV, CCM, stitched ciphers and Wrap modes have special
-             * requirements about input lengths so we don't fragment for those
-             */
-            if (cdat->aead == EVP_CIPH_CCM_MODE
-                || cdat->aead == EVP_CIPH_CBC_MODE
-                || (cdat->aead == -1
-                    && EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_STREAM_CIPHER)
-                || ((EVP_CIPHER_get_flags(cdat->cipher) & EVP_CIPH_FLAG_CTS) != 0)
-                || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_SIV_MODE
-                || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_GCM_SIV_MODE
-                || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_XTS_MODE
-                || EVP_CIPHER_get_mode(cdat->cipher) == EVP_CIPH_WRAP_MODE)
-                break;
-            out_misalign = 0;
-            frag++;
-        } else {
-            out_misalign++;
+    fragmax = (cipher_test_valid_fragmentation(cdat) == 0) ? 0 : 1;
+    for (in_place = 1; in_place >= 0; in_place--) {
+        static char aux_err[64];
+
+        t->aux_err = aux_err;
+        /* Test only in-place data processing */
+        if (process_mode_in_place == 1 && in_place == 0)
+            break;
+
+        for (frag = 0; frag <= fragmax; frag++) {
+            for (out_misalign = 0; out_misalign <= 1; out_misalign++) {
+                for (inp_misalign = 0; inp_misalign <= 1; inp_misalign++) {
+                    /* Skip input misalign tests for in-place processing */
+                    if (inp_misalign == 1 && in_place == 1)
+                        break;
+                    if (in_place == 1) {
+                        BIO_snprintf(aux_err, sizeof(aux_err),
+                                        "%s in-place, %sfragmented",
+                                        out_misalign ? "misaligned" : "aligned",
+                                        frag ? "" : "not ");
+                    } else {
+                        BIO_snprintf(aux_err, sizeof(aux_err),
+                                        "%s output and %s input, %sfragmented",
+                                        out_misalign ? "misaligned" : "aligned",
+                                        inp_misalign ? "misaligned" : "aligned",
+                                        frag ? "" : "not ");
+                    }
+                    if (cdat->enc) {
+                        rv = cipher_test_enc(t, 1, out_misalign, inp_misalign,
+                                             frag, in_place);
+                        /* Not fatal errors: return */
+                        if (rv != 1) {
+                            if (rv < 0)
+                                return 0;
+                            return 1;
+                        }
+                    }
+                    if (cdat->enc != 1) {
+                        rv = cipher_test_enc(t, 0, out_misalign, inp_misalign,
+                                             frag, in_place);
+                        /* Not fatal errors: return */
+                        if (rv != 1) {
+                            if (rv < 0)
+                                return 0;
+                            return 1;
+                        }
+                    }
+                }
+            }
         }
     }
     t->aux_err = NULL;
@@ -1197,7 +1259,7 @@ static int mac_test_init(EVP_TEST *t, const char *alg)
         t->skip = 1;
         return 1;
     }
-    if ((mac = EVP_MAC_fetch(libctx, alg, NULL)) == NULL) {
+    if ((mac = EVP_MAC_fetch(libctx, alg, propquery)) == NULL) {
         /*
          * Since we didn't find an EVP_MAC, we check for known EVP_PKEY methods
          * For debugging purposes, we allow 'NNNN by EVP_PKEY' to force running
@@ -1374,7 +1436,7 @@ static int mac_test_run_pkey(EVP_TEST *t)
             t->err = NULL;
             goto err;
         }
-        if (!TEST_ptr(cipher = EVP_CIPHER_fetch(libctx, expected->alg, NULL))) {
+        if (!TEST_ptr(cipher = EVP_CIPHER_fetch(libctx, expected->alg, propquery))) {
             t->err = "MAC_KEY_CREATE_ERROR";
             goto err;
         }
@@ -1452,6 +1514,7 @@ static int mac_test_run_mac(EVP_TEST *t)
     EVP_MAC_CTX *ctx = NULL;
     unsigned char *got = NULL;
     size_t got_len = 0, size = 0;
+    size_t size_before_init = 0, size_after_init, size_val = 0;
     int i, block_size = -1, output_size = -1;
     OSSL_PARAM params[21], sizes[3], *psizes = sizes;
     size_t params_n = 0;
@@ -1548,6 +1611,9 @@ static int mac_test_run_mac(EVP_TEST *t)
         }
         params_n++;
 
+        if (strcmp(tmpkey, "size") == 0)
+            size_val = (size_t)strtoul(tmpval, NULL, 0);
+
         OPENSSL_free(tmpkey);
     }
     params[params_n] = OSSL_PARAM_construct_end();
@@ -1556,10 +1622,28 @@ static int mac_test_run_mac(EVP_TEST *t)
         t->err = "MAC_CREATE_ERROR";
         goto err;
     }
-
+    if (fips_provider_version_gt(libctx, 3, 2, 0))
+        size_before_init = EVP_MAC_CTX_get_mac_size(ctx);
     if (!EVP_MAC_init(ctx, expected->key, expected->key_len, params)) {
         t->err = "MAC_INIT_ERROR";
         goto err;
+    }
+    size_after_init = EVP_MAC_CTX_get_mac_size(ctx);
+    if (!TEST_false(size_before_init == 0 && size_after_init == 0)) {
+        t->err = "MAC SIZE not set";
+        goto err;
+    }
+    if (size_before_init != 0) {
+        /* mac-size not modified by init params */
+        if (size_val == 0 && !TEST_size_t_eq(size_before_init, size_after_init)) {
+            t->err = "MAC SIZE check failed";
+            goto err;
+        }
+        /* mac-size modified by init params */
+        if (size_val != 0 && !TEST_size_t_eq(size_val, size_after_init)) {
+            t->err = "MAC SIZE check failed";
+            goto err;
+        }
     }
     if (expected->output_size >= 0)
         *psizes++ = OSSL_PARAM_construct_int(OSSL_MAC_PARAM_SIZE,
@@ -1747,7 +1831,7 @@ static int pkey_test_init(EVP_TEST *t, const char *name,
         return 0;
     }
     kdata->keyop = keyop;
-    if (!TEST_ptr(kdata->ctx = EVP_PKEY_CTX_new_from_pkey(libctx, pkey, NULL))) {
+    if (!TEST_ptr(kdata->ctx = EVP_PKEY_CTX_new_from_pkey(libctx, pkey, propquery))) {
         EVP_PKEY_free(pkey);
         OPENSSL_free(kdata);
         return 0;
@@ -2246,7 +2330,7 @@ static int pbe_test_run(EVP_TEST *t)
 #endif
     } else if (expected->pbe_type == PBE_TYPE_PKCS12) {
         fetched_digest = EVP_MD_fetch(libctx, EVP_MD_get0_name(expected->md),
-                                      NULL);
+                                      propquery);
         if (fetched_digest == NULL) {
             t->err = "PKCS12_ERROR";
             goto err;
@@ -2486,7 +2570,7 @@ static int rand_test_init(EVP_TEST *t, const char *name)
     if (!EVP_RAND_CTX_set_params(rdata->parent, params))
         goto err;
 
-    rand = EVP_RAND_fetch(libctx, name, NULL);
+    rand = EVP_RAND_fetch(libctx, name, propquery);
     if (rand == NULL)
         goto err;
     rdata->ctx = EVP_RAND_CTX_new(rand, rdata->parent);
@@ -2738,7 +2822,7 @@ static int kdf_test_init(EVP_TEST *t, const char *name)
     kdata->p = kdata->params;
     *kdata->p = OSSL_PARAM_construct_end();
 
-    kdf = EVP_KDF_fetch(libctx, name, NULL);
+    kdf = EVP_KDF_fetch(libctx, name, propquery);
     if (kdf == NULL) {
         OPENSSL_free(kdata);
         return 0;
@@ -2775,7 +2859,9 @@ static int kdf_test_ctrl(EVP_TEST *t, EVP_KDF_CTX *kctx,
     if (!TEST_ptr(name = OPENSSL_strdup(value)))
         return 0;
     p = strchr(name, ':');
-    if (p != NULL)
+    if (p == NULL)
+        p = "";
+    else
         *p++ = '\0';
 
     if (strcmp(name, "r") == 0
@@ -2828,30 +2914,29 @@ static int kdf_test_ctrl(EVP_TEST *t, EVP_KDF_CTX *kctx,
     }
 
     rv = OSSL_PARAM_allocate_from_text(kdata->p, defs, name, p,
-                                       p != NULL ? strlen(p) : 0, NULL);
+                                       strlen(p), NULL);
     *++kdata->p = OSSL_PARAM_construct_end();
     if (!rv) {
         t->err = "KDF_PARAM_ERROR";
         OPENSSL_free(name);
         return 0;
     }
-    if (p != NULL && strcmp(name, "digest") == 0) {
+    if (strcmp(name, "digest") == 0) {
         if (is_digest_disabled(p)) {
             TEST_info("skipping, '%s' is disabled", p);
             t->skip = 1;
         }
         goto end;
     }
-    if (p != NULL
-        && (strcmp(name, "cipher") == 0
-            || strcmp(name, "cekalg") == 0)
+
+    if ((strcmp(name, "cipher") == 0
+        || strcmp(name, "cekalg") == 0)
         && is_cipher_disabled(p)) {
         TEST_info("skipping, '%s' is disabled", p);
         t->skip = 1;
         goto end;
     }
-    if (p != NULL
-        && (strcmp(name, "mac") == 0)
+    if ((strcmp(name, "mac") == 0)
         && is_mac_disabled(p)) {
         TEST_info("skipping, '%s' is disabled", p);
         t->skip = 1;
@@ -2947,7 +3032,7 @@ static int pkey_kdf_test_init(EVP_TEST *t, const char *name)
     if (!TEST_ptr(kdata = OPENSSL_zalloc(sizeof(*kdata))))
         return 0;
 
-    kdata->ctx = EVP_PKEY_CTX_new_from_name(libctx, name, NULL);
+    kdata->ctx = EVP_PKEY_CTX_new_from_name(libctx, name, propquery);
     if (kdata->ctx == NULL
         || EVP_PKEY_derive_init(kdata->ctx) <= 0)
         goto err;
@@ -3175,7 +3260,7 @@ static int keygen_test_init(EVP_TEST *t, const char *alg)
         t->skip = 1;
         return 1;
     }
-    if (!TEST_ptr(genctx = EVP_PKEY_CTX_new_from_name(libctx, alg, NULL)))
+    if (!TEST_ptr(genctx = EVP_PKEY_CTX_new_from_name(libctx, alg, propquery)))
         goto err;
 
     if (EVP_PKEY_keygen_init(genctx) <= 0) {
@@ -4070,6 +4155,12 @@ const OPTIONS *test_get_options(void)
         OPT_TEST_OPTIONS_WITH_EXTRA_USAGE("[file...]\n"),
         { "config", OPT_CONFIG_FILE, '<',
           "The configuration file to use for the libctx" },
+        { "process", OPT_IN_PLACE, 's',
+          "Mode for data processing by cipher tests [in_place/both], both by default"},
+        { "provider", OPT_PROVIDER_NAME, 's',
+          "The provider to load (when no configuration file, the default value is 'default')" },
+        { "propquery", OPT_PROV_PROPQUERY, 's',
+          "Property query used when fetching algorithms" },
         { OPT_HELP_STR, 1, '-', "file\tFile to run tests on.\n" },
         { NULL }
     };
@@ -4080,6 +4171,7 @@ int setup_tests(void)
 {
     size_t n;
     char *config_file = NULL;
+    char *provider_name = NULL;
 
     OPTION_CHOICE o;
 
@@ -4088,8 +4180,18 @@ int setup_tests(void)
         case OPT_CONFIG_FILE:
             config_file = opt_arg();
             break;
+        case OPT_IN_PLACE:
+            if ((process_mode_in_place = evp_test_process_mode(opt_arg())) == -1)
+                return 0;
+            break;
+        case OPT_PROVIDER_NAME:
+            provider_name = opt_arg();
+            break;
+        case OPT_PROV_PROPQUERY:
+            propquery = opt_arg();
+            break;
         case OPT_TEST_CASES:
-           break;
+            break;
         default:
         case OPT_ERR:
             return 0;
@@ -4101,7 +4203,9 @@ int setup_tests(void)
      * Load the 'null' provider into the default library context to ensure that
      * the tests do not fallback to using the default provider.
      */
-    if (!test_get_libctx(&libctx, &prov_null, config_file, NULL, NULL))
+    if (config_file == NULL && provider_name == NULL)
+        provider_name = "default";
+    if (!test_get_libctx(&libctx, &prov_null, config_file, &libprov, provider_name))
         return 0;
 
     n = test_get_argument_count();
@@ -4114,6 +4218,7 @@ int setup_tests(void)
 
 void cleanup_tests(void)
 {
+    OSSL_PROVIDER_unload(libprov);
     OSSL_PROVIDER_unload(prov_null);
     OSSL_LIB_CTX_free(libctx);
 }

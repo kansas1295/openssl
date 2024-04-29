@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -405,9 +405,9 @@ static int drbg_hash_verify_zeroization(void *vdrbg)
     if (drbg->lock != NULL && !CRYPTO_THREAD_read_lock(drbg->lock))
         return 0;
 
-    PROV_DRBG_VERYIFY_ZEROIZATION(hash->V);
-    PROV_DRBG_VERYIFY_ZEROIZATION(hash->C);
-    PROV_DRBG_VERYIFY_ZEROIZATION(hash->vtmp);
+    PROV_DRBG_VERIFY_ZEROIZATION(hash->V);
+    PROV_DRBG_VERIFY_ZEROIZATION(hash->C);
+    PROV_DRBG_VERIFY_ZEROIZATION(hash->vtmp);
 
     ret = 1;
  err:
@@ -439,7 +439,8 @@ static int drbg_hash_new(PROV_DRBG *ctx)
 static void *drbg_hash_new_wrapper(void *provctx, void *parent,
                                    const OSSL_DISPATCH *parent_dispatch)
 {
-    return ossl_rand_drbg_new(provctx, parent, parent_dispatch, &drbg_hash_new,
+    return ossl_rand_drbg_new(provctx, parent, parent_dispatch,
+                              &drbg_hash_new, &drbg_hash_free,
                               &drbg_hash_instantiate, &drbg_hash_uninstantiate,
                               &drbg_hash_reseed, &drbg_hash_generate);
 }
@@ -506,6 +507,7 @@ static int drbg_hash_set_ctx_params_locked(void *vctx, const OSSL_PARAM params[]
     PROV_DRBG_HASH *hash = (PROV_DRBG_HASH *)ctx->data;
     OSSL_LIB_CTX *libctx = PROV_LIBCTX_OF(ctx->provctx);
     const EVP_MD *md;
+    int md_size;
 
     if (!ossl_prov_digest_load_from_params(&hash->digest, params, libctx))
         return 0;
@@ -516,7 +518,10 @@ static int drbg_hash_set_ctx_params_locked(void *vctx, const OSSL_PARAM params[]
             return 0;   /* Error already raised for us */
 
         /* These are taken from SP 800-90 10.1 Table 2 */
-        hash->blocklen = EVP_MD_get_size(md);
+        md_size = EVP_MD_get_size(md);
+        if (md_size <= 0)
+            return 0;
+        hash->blocklen = md_size;
         /* See SP800-57 Part1 Rev4 5.6.1 Table 3 */
         ctx->strength = 64 * (hash->blocklen >> 3);
         if (ctx->strength > 256)

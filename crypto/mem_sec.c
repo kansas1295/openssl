@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2023 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright 2004-2014, Akamai Technologies. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
@@ -260,11 +260,17 @@ int CRYPTO_secure_allocated(const void *ptr)
 
 size_t CRYPTO_secure_used(void)
 {
+    size_t ret = 0;
+
 #ifndef OPENSSL_NO_SECURE_MEMORY
-    return secure_mem_used;
-#else
-    return 0;
+    if (!CRYPTO_THREAD_read_lock(sec_malloc_lock))
+        return 0;
+
+    ret = secure_mem_used;
+
+    CRYPTO_THREAD_unlock(sec_malloc_lock);
 #endif /* OPENSSL_NO_SECURE_MEMORY */
+    return ret;
 }
 
 size_t CRYPTO_secure_actual_size(void *ptr)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -21,7 +21,7 @@ static const QUIC_CONN_ID empty_conn_id = {0, {0}};
 #define RX_TEST_OP_END                     0 /* end of script */
 #define RX_TEST_OP_SET_SCID_LEN            1 /* change SCID length */
 #define RX_TEST_OP_SET_INIT_LARGEST_PN     2 /* set initial largest PN */
-#define RX_TEST_OP_ADD_RX_DCID             3 /* register an RX DCID */
+#define RX_TEST_OP_SET_RX_DCID             3 /* register an RX DCID */
 #define RX_TEST_OP_INJECT                  4 /* inject a datagram into demux */
 #define RX_TEST_OP_PROVIDE_SECRET          5 /* provide RX secret */
 #define RX_TEST_OP_PROVIDE_SECRET_INITIAL  6 /* provide RX secret for initial */
@@ -32,6 +32,7 @@ static const QUIC_CONN_ID empty_conn_id = {0, {0}};
 #define RX_TEST_OP_KEY_UPDATE_TIMEOUT     11 /* complete key update process */
 #define RX_TEST_OP_SET_INIT_KEY_PHASE     12 /* initial Key Phase bit value */
 #define RX_TEST_OP_CHECK_PKT_EPOCH        13 /* check read key epoch matches */
+#define RX_TEST_OP_ALLOW_1RTT             14 /* allow 1RTT packet processing */
 
 struct rx_test_op {
     unsigned char op;
@@ -53,8 +54,8 @@ struct rx_test_op {
     { RX_TEST_OP_SET_SCID_LEN, 0, NULL, 0, NULL, (scid_len), 0, 0, NULL, NULL },
 #define RX_OP_SET_INIT_LARGEST_PN(largest_pn) \
     { RX_TEST_OP_SET_INIT_LARGEST_PN, 0, NULL, 0, NULL, 0, 0, (largest_pn), NULL, NULL },
-#define RX_OP_ADD_RX_DCID(dcid) \
-    { RX_TEST_OP_ADD_RX_DCID, 0, NULL, 0, NULL, 0, 0, 0, &(dcid), NULL },
+#define RX_OP_SET_RX_DCID(dcid) \
+    { RX_TEST_OP_SET_RX_DCID, 0, NULL, 0, NULL, 0, 0, 0, &(dcid), NULL },
 #define RX_OP_INJECT(dgram) \
     { RX_TEST_OP_INJECT, 0, (dgram), sizeof(dgram), NULL, 0, 0, 0, NULL },
 #define RX_OP_PROVIDE_SECRET(el, suite, key)                           \
@@ -81,6 +82,8 @@ struct rx_test_op {
     { RX_TEST_OP_SET_INIT_KEY_PHASE, 0, NULL, 0, NULL, (kp_bit), 0, 0, NULL },
 #define RX_OP_CHECK_PKT_EPOCH(expected) \
     { RX_TEST_OP_CHECK_PKT_EPOCH, 0, NULL, 0, NULL, 0, 0, (expected), NULL },
+#define RX_OP_ALLOW_1RTT() \
+    { RX_TEST_OP_ALLOW_1RTT, 0, NULL, 0, NULL, 0, 0, 0, NULL },
 
 #define RX_OP_INJECT_N(n)                                          \
     RX_OP_INJECT(rx_script_##n##_in)
@@ -135,7 +138,7 @@ static const QUIC_PKT_HDR rx_script_1_expect_hdr = {
 static const struct rx_test_op rx_script_1[] = {
     RX_OP_SET_SCID_LEN(2)
     RX_OP_SET_INIT_LARGEST_PN(0)
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_1_dcid)
     RX_OP_INJECT_CHECK(1)
     RX_OP_CHECK_NO_PKT()
@@ -143,7 +146,7 @@ static const struct rx_test_op rx_script_1[] = {
 };
 
 /* 2. RFC 9001 - A.5 ChaCha20-Poly1305 Short Header Packet */
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
 static const unsigned char rx_script_2_in[] = {
     0x4c, 0xfe, 0x41, 0x89, 0x65, 0x5e, 0x5c, 0xd5, 0x5c, 0x41, 0xf6, 0x90,
     0x80, 0x57, 0x5d, 0x79, 0x99, 0xc2, 0x5a, 0x5b, 0xfb
@@ -168,15 +171,16 @@ static const QUIC_PKT_HDR rx_script_2_expect_hdr = {
 };
 
 static const struct rx_test_op rx_script_2[] = {
+    RX_OP_ALLOW_1RTT()
     RX_OP_SET_INIT_LARGEST_PN(654360560)
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_PROVIDE_SECRET(QUIC_ENC_LEVEL_1RTT, QRL_SUITE_CHACHA20POLY1305,
                          rx_script_2_secret)
     RX_OP_INJECT_CHECK(2)
     RX_OP_CHECK_NO_PKT()
     RX_OP_END
 };
-#endif /* !defined(OPENSSL_NO_CHACHA) */
+#endif /* !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305) */
 
 /* 3. Real World - Version Negotiation Response */
 static const unsigned char rx_script_3_in[] = {
@@ -214,7 +218,7 @@ static const unsigned char rx_script_3_body[] = {
 };
 
 static const struct rx_test_op rx_script_3[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     /*
      * This is a version negotiation packet, so doesn't have any frames.
      * However, the depacketizer still handles this sort of packet, so
@@ -275,7 +279,7 @@ static const unsigned char rx_script_4_body[] = {
 };
 
 static const struct rx_test_op rx_script_4[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_INJECT_CHECK(4)
     RX_OP_CHECK_NO_PKT()
     RX_OP_END
@@ -587,7 +591,8 @@ static const unsigned char rx_script_5c_body[] = {
 };
 
 static const struct rx_test_op rx_script_5[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_ALLOW_1RTT()
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_5_c2s_init_dcid)
     RX_OP_INJECT_N(5)
     RX_OP_CHECK_PKT_N(5a)
@@ -624,7 +629,7 @@ static const struct rx_test_op rx_script_5[] = {
 
     /* Recreate QRL, test reading packets received before key */
     RX_OP_SET_SCID_LEN(0)
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_INJECT_N(5)
     RX_OP_CHECK_NO_PKT()
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_5_c2s_init_dcid)
@@ -955,7 +960,8 @@ static const unsigned char rx_script_6c_body[] = {
 };
 
 static const struct rx_test_op rx_script_6[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_ALLOW_1RTT()
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_6_c2s_init_dcid)
     RX_OP_INJECT_N(6)
     RX_OP_CHECK_PKT_N(6a)
@@ -992,7 +998,7 @@ static const struct rx_test_op rx_script_6[] = {
 
     /* Recreate QRL, test reading packets received before key */
     RX_OP_SET_SCID_LEN(0)
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_INJECT_N(6)
     RX_OP_CHECK_NO_PKT()
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_6_c2s_init_dcid)
@@ -1014,7 +1020,7 @@ static const struct rx_test_op rx_script_6[] = {
  * 7. Real World - S2C Multiple Packets
  *      - Initial, Handshake, 1-RTT (ChaCha20-Poly1305)
  */
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
 static const QUIC_CONN_ID rx_script_7_c2s_init_dcid = {
     4, {0xfa, 0x5d, 0xd6, 0x80}
 };
@@ -1317,7 +1323,8 @@ static const unsigned char rx_script_7c_body[] = {
 };
 
 static const struct rx_test_op rx_script_7[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_ALLOW_1RTT()
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_7_c2s_init_dcid)
     RX_OP_INJECT_N(7)
     RX_OP_CHECK_PKT_N(7a)
@@ -1354,7 +1361,7 @@ static const struct rx_test_op rx_script_7[] = {
 
     /* Recreate QRL, test reading packets received before key */
     RX_OP_SET_SCID_LEN(0)
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_SET_RX_DCID(empty_conn_id)
     RX_OP_INJECT_N(7)
     RX_OP_CHECK_NO_PKT()
     RX_OP_PROVIDE_SECRET_INITIAL(rx_script_7_c2s_init_dcid)
@@ -1371,7 +1378,7 @@ static const struct rx_test_op rx_script_7[] = {
 
     RX_OP_END
 };
-#endif /* !defined(OPENSSL_NO_CHACHA) */
+#endif /* !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305) */
 
 /*
  * 8. Real World - S2C Multiple Packets with Peer Initiated Key Phase Update
@@ -1575,7 +1582,8 @@ static const unsigned char rx_script_8f_body[] = {
 };
 
 static const struct rx_test_op rx_script_8[] = {
-    RX_OP_ADD_RX_DCID(empty_conn_id)
+    RX_OP_ALLOW_1RTT()
+    RX_OP_SET_RX_DCID(empty_conn_id)
     /* Inject before we get the keys */
     RX_OP_INJECT_N(8a)
     /* Nothing yet */
@@ -1666,19 +1674,42 @@ static const struct rx_test_op rx_script_8[] = {
     RX_OP_END
 };
 
+/* 9. 1-RTT Deferral Test */
+static const struct rx_test_op rx_script_9[] = {
+    RX_OP_SET_RX_DCID(empty_conn_id)
+    RX_OP_PROVIDE_SECRET_INITIAL(rx_script_5_c2s_init_dcid)
+    RX_OP_INJECT_N(5)
+
+    RX_OP_CHECK_PKT_N(5a)
+    RX_OP_CHECK_NO_PKT() /* not got secret for next packet yet */
+    RX_OP_PROVIDE_SECRET(QUIC_ENC_LEVEL_HANDSHAKE,
+                      QRL_SUITE_AES128GCM, rx_script_5_handshake_secret)
+    RX_OP_CHECK_PKT_N(5b)
+    RX_OP_CHECK_NO_PKT() /* not got secret for next packet yet */
+    RX_OP_PROVIDE_SECRET(QUIC_ENC_LEVEL_1RTT,
+                      QRL_SUITE_AES128GCM, rx_script_5_1rtt_secret)
+    RX_OP_CHECK_NO_PKT() /* still nothing - 1-RTT not enabled */
+    RX_OP_ALLOW_1RTT()
+    RX_OP_CHECK_PKT_N(5c) /* now we get the 1-RTT packet */
+    RX_OP_CHECK_NO_PKT()
+
+    RX_OP_END
+};
+
 static const struct rx_test_op *rx_scripts[] = {
     rx_script_1,
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
     rx_script_2,
 #endif
     rx_script_3,
     rx_script_4,
     rx_script_5,
     rx_script_6,
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
     rx_script_7,
 #endif
-    rx_script_8
+    rx_script_8,
+    rx_script_9
 };
 
 struct rx_state {
@@ -1691,6 +1722,10 @@ struct rx_state {
     /* Used for the RX depacketizer */
     SSL_CTX            *quic_ssl_ctx;
     QUIC_CONNECTION    *quic_conn;
+
+    QUIC_CONN_ID        rx_dcid;
+
+    int                 allow_1rtt;
 };
 
 static void rx_state_teardown(struct rx_state *s)
@@ -1727,6 +1762,17 @@ static OSSL_TIME fake_time(void *arg)
     return expected_time(++time_counter);
 }
 
+static void demux_default_handler(QUIC_URXE *e, void *arg,
+                                  const QUIC_CONN_ID *dcid)
+{
+    struct rx_state *s = arg;
+
+    if (dcid == NULL || !ossl_quic_conn_id_eq(dcid, &s->rx_dcid))
+        return;
+
+    ossl_qrx_inject_urxe(s->qrx, e);
+}
+
 static int rx_state_ensure(struct rx_state *s)
 {
     if (s->demux == NULL
@@ -1743,6 +1789,11 @@ static int rx_state_ensure(struct rx_state *s)
     if (s->qrx == NULL
         && !TEST_ptr(s->qrx = ossl_qrx_new(&s->args)))
         return 0;
+
+    ossl_quic_demux_set_default_handler(s->demux, demux_default_handler, s);
+
+    if (s->allow_1rtt)
+        ossl_qrx_allow_1rtt_processing(s->qrx);
 
     return 1;
 }
@@ -1767,11 +1818,10 @@ static int rx_run_script(const struct rx_test_op *script)
                 for (i = 0; i < QUIC_PN_SPACE_NUM; ++i)
                     s.args.init_largest_pn[i] = op->largest_pn;
                 break;
-            case RX_TEST_OP_ADD_RX_DCID:
+            case RX_TEST_OP_SET_RX_DCID:
                 if (!TEST_true(rx_state_ensure(&s)))
                     goto err;
-                if (!TEST_true(ossl_qrx_add_dst_conn_id(s.qrx, op->dcid)))
-                    goto err;
+                s.rx_dcid = *op->dcid;
                 break;
             case RX_TEST_OP_PROVIDE_SECRET:
                 if (!TEST_true(rx_state_ensure(&s)))
@@ -1864,6 +1914,13 @@ static int rx_run_script(const struct rx_test_op *script)
             case RX_TEST_OP_SET_INIT_KEY_PHASE:
                 rx_state_teardown(&s);
                 s.args.init_key_phase_bit = (unsigned char)op->enc_level;
+                break;
+            case RX_TEST_OP_ALLOW_1RTT:
+                s.allow_1rtt = 1;
+
+                if (!TEST_true(rx_state_ensure(&s)))
+                    goto err;
+
                 break;
             default:
                 OPENSSL_assert(0);
@@ -2710,6 +2767,11 @@ static int test_wire_pkt_hdr_actual(int tidx, int repeat, int cipher,
     hpr_key[8] = (unsigned char)tidx;
     hpr_key[9] = (unsigned char)repeat;
 
+    if (is_trunc && trunc_len > t->min_success_len
+        && t->hdr.type == QUIC_PKT_TYPE_VERSION_NEG
+        && ((trunc_len - t->min_success_len) % 4) != 0)
+        expect_fail = 1;
+
     switch (cipher) {
         case 0:
             hpr_cipher_id = QUIC_HDR_PROT_CIPHER_AES_128;
@@ -2725,7 +2787,7 @@ static int test_wire_pkt_hdr_actual(int tidx, int repeat, int cipher,
              * Removing all dependence on CHACHA is more difficult and these
              * tests are fast enough.
              */
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
             hpr_cipher_id = QUIC_HDR_PROT_CIPHER_CHACHA;
 #else
             hpr_cipher_id = QUIC_HDR_PROT_CIPHER_AES_256;
@@ -3213,7 +3275,7 @@ static const struct tx_test_op tx_script_2[] = {
     TX_OP_END
 };
 
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
 /* 3. RFC 9001 - A.5 ChaCha20-Poly1305 Short Header Packet */
 static const unsigned char tx_script_3_body[] = {
     0x01
@@ -3264,7 +3326,7 @@ static const struct tx_test_op tx_script_3[] = {
     TX_OP_WRITE_CHECK(3)
     TX_OP_END
 };
-#endif /* !defined(OPENSSL_NO_CHACHA) */
+#endif /* !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305) */
 
 /* 4. Real World - AES-128-GCM Key Update */
 static const unsigned char tx_script_4_secret[] = {
@@ -3537,7 +3599,7 @@ static const struct tx_test_op tx_script_6[] = {
 static const struct tx_test_op *const tx_scripts[] = {
     tx_script_1,
     tx_script_2,
-#ifndef OPENSSL_NO_CHACHA
+#if !defined(OPENSSL_NO_CHACHA) && !defined(OPENSSL_NO_POLY1305)
     tx_script_3,
 #endif
     tx_script_4,

@@ -1,5 +1,5 @@
 /*
- * Copyright 2019-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2019-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -478,7 +478,7 @@ opthelp:
             ret = OSSL_PROVIDER_available(NULL, prov_name) ? 0 : 1;
             if (!quiet) {
                 BIO_printf(bio_err, "FIPS provider is %s\n",
-                           ret == 0 ? "available" : " not available");
+                           ret == 0 ? "available" : "not available");
             }
         }
         goto end;

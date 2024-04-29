@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -108,6 +108,17 @@ static void helper_cleanup(struct helper *h)
     BIO_free(h->bio2);
 }
 
+static void demux_default_handler(QUIC_URXE *e, void *arg,
+                                  const QUIC_CONN_ID *dcid)
+{
+    struct helper *h = arg;
+
+    if (dcid == NULL || !ossl_quic_conn_id_eq(dcid, &dcid_1))
+        return;
+
+    ossl_qrx_inject_urxe(h->qrx, e);
+}
+
 static int helper_init(struct helper *h)
 {
     int rc = 0;
@@ -204,6 +215,8 @@ static int helper_init(struct helper *h)
                                                  fake_now, NULL)))
         goto err;
 
+    ossl_quic_demux_set_default_handler(h->demux, demux_default_handler, h);
+
     h->qrx_args.demux                  = h->demux;
     h->qrx_args.short_conn_id_len      = 8;
     h->qrx_args.max_deferred           = 32;
@@ -211,8 +224,7 @@ static int helper_init(struct helper *h)
     if (!TEST_ptr(h->qrx = ossl_qrx_new(&h->qrx_args)))
         goto err;
 
-    if (!TEST_true(ossl_qrx_add_dst_conn_id(h->qrx, &dcid_1)))
-        goto err;
+    ossl_qrx_allow_1rtt_processing(h->qrx);
 
     rc = 1;
 err:
@@ -401,7 +413,7 @@ static int schedule_cfq_new_conn_id(struct helper *h)
     ncid.seq_num         = 2345;
     ncid.retire_prior_to = 1234;
     ncid.conn_id         = cid_1;
-    memcpy(ncid.stateless_reset_token, reset_token_1, sizeof(reset_token_1));
+    memcpy(ncid.stateless_reset.token, reset_token_1, sizeof(reset_token_1));
 
     if (!TEST_ptr(buf_mem = BUF_MEM_new()))
         goto err;
@@ -421,7 +433,7 @@ static int schedule_cfq_new_conn_id(struct helper *h)
 
     if (!TEST_ptr(cfq_item = ossl_quic_cfq_add_frame(h->args.cfq, 1,
                                                      QUIC_PN_SPACE_APP,
-                                                     OSSL_QUIC_FRAME_TYPE_NEW_CONN_ID,
+                                                     OSSL_QUIC_FRAME_TYPE_NEW_CONN_ID, 0,
                                                      (unsigned char *)buf_mem->data, l,
                                                      free_buf_mem,
                                                      buf_mem)))
@@ -440,7 +452,7 @@ static int check_cfq_new_conn_id(struct helper *h)
         || !TEST_uint64_t_eq(h->frame.new_conn_id.retire_prior_to, 1234)
         || !TEST_mem_eq(&h->frame.new_conn_id.conn_id, sizeof(cid_1),
                         &cid_1, sizeof(cid_1))
-        || !TEST_mem_eq(&h->frame.new_conn_id.stateless_reset_token,
+        || !TEST_mem_eq(&h->frame.new_conn_id.stateless_reset.token,
                         sizeof(reset_token_1),
                         reset_token_1,
                         sizeof(reset_token_1)))
@@ -497,7 +509,7 @@ static int schedule_cfq_new_token(struct helper *h)
 
     if (!TEST_ptr(cfq_item = ossl_quic_cfq_add_frame(h->args.cfq, 1,
                                                      QUIC_PN_SPACE_APP,
-                                                     OSSL_QUIC_FRAME_TYPE_NEW_TOKEN,
+                                                     OSSL_QUIC_FRAME_TYPE_NEW_TOKEN, 0,
                                                      (unsigned char *)buf_mem->data, l,
                                                      free_buf_mem,
                                                      buf_mem)))
@@ -1196,6 +1208,54 @@ static const struct script_op script_17[] = {
     OP_END
 };
 
+/* 18. Big Token Rejection */
+static const unsigned char big_token[1950];
+
+static int try_big_token(struct helper *h)
+{
+    size_t i;
+
+    /* Ensure big token is rejected */
+    if (!TEST_false(ossl_quic_tx_packetiser_set_initial_token(h->txp,
+                                                              big_token,
+                                                              sizeof(big_token),
+                                                              NULL,
+                                                              NULL)))
+        return 0;
+
+    /*
+     * Keep trying until we find an acceptable size, then make sure
+     * that works for generation
+     */
+    for (i = sizeof(big_token) - 1;; --i) {
+        if (!TEST_size_t_gt(i, 0))
+            return 0;
+
+        if (ossl_quic_tx_packetiser_set_initial_token(h->txp, big_token, i,
+                                                      NULL, NULL))
+            break;
+    }
+
+    return 1;
+}
+
+static const struct script_op script_18[] = {
+    OP_PROVIDE_SECRET(QUIC_ENC_LEVEL_INITIAL, QRL_SUITE_AES128GCM, secret_1)
+    OP_TXP_GENERATE_NONE()
+    OP_CHECK(try_big_token)
+    OP_TXP_GENERATE_NONE()
+    OP_CRYPTO_SEND(QUIC_PN_SPACE_INITIAL, crypto_1)
+    OP_TXP_GENERATE()
+    OP_RX_PKT()
+    OP_EXPECT_DGRAM_LEN(1200, 1200)
+    OP_NEXT_FRAME()
+    OP_EXPECT_FRAME(OSSL_QUIC_FRAME_TYPE_CRYPTO)
+    OP_EXPECT_NO_FRAME()
+    OP_RX_PKT_NONE()
+    OP_TXP_GENERATE_NONE()
+    OP_END
+};
+
 static const struct script_op *const scripts[] = {
     script_1,
     script_2,
@@ -1213,7 +1273,8 @@ static const struct script_op *const scripts[] = {
     script_14,
     script_15,
     script_16,
-    script_17
+    script_17,
+    script_18
 };
 
 static void skip_padding(struct helper *h)
@@ -1242,16 +1303,16 @@ static int run_script(int script_idx, const struct script_op *script)
     for (op = script, opn = 0; op->opcode != OPK_END; ++op, ++opn) {
         switch (op->opcode) {
         case OPK_TXP_GENERATE:
-            if (!TEST_int_eq(ossl_quic_tx_packetiser_generate(h.txp, &status),
-                             TX_PACKETISER_RES_SENT_PKT))
+            if (!TEST_true(ossl_quic_tx_packetiser_generate(h.txp, &status))
+                && !TEST_size_t_gt(status.sent_pkt, 0))
                 goto err;
 
             ossl_qtx_finish_dgram(h.args.qtx);
             ossl_qtx_flush_net(h.args.qtx);
             break;
         case OPK_TXP_GENERATE_NONE:
-            if (!TEST_int_eq(ossl_quic_tx_packetiser_generate(h.txp, &status),
-                             TX_PACKETISER_RES_NO_PKT))
+            if (!TEST_true(ossl_quic_tx_packetiser_generate(h.txp, &status))
+                && !TEST_size_t_eq(status.sent_pkt, 0))
                 goto err;
 
             break;
@@ -1548,7 +1609,6 @@ err:
 
 static int test_script(int idx)
 {
-    if (idx + 1 != 18) return 1;
     return run_script(idx, scripts[idx]);
 }
 

@@ -68,7 +68,7 @@ static void put_conn_id(BIO *bio, QUIC_CONN_ID *id)
 static void put_token(BIO *bio, const uint8_t *token, size_t token_len)
 {
     if (token_len == 0)
-        BIO_puts(bio, "<zerlo length token>");
+        BIO_puts(bio, "<zero length token>");
     else
         put_data(bio, token, token_len);
 }
@@ -330,7 +330,8 @@ static int frame_new_conn_id(BIO *bio, PACKET *pkt)
     BIO_puts(bio, "    Connection id: ");
     put_conn_id(bio, &frame_data.conn_id);
     BIO_puts(bio, "\n    Stateless Reset Token: ");
-    put_data(bio, frame_data.stateless_reset_token, 16);
+    put_data(bio, frame_data.stateless_reset.token,
+             sizeof(frame_data.stateless_reset.token));
     BIO_puts(bio, "\n");
 
     return 1;
@@ -578,8 +579,8 @@ int ossl_quic_trace(int write_p, int version, int content_type,
                 return 0;
             /* Decode the packet header */
             /*
-             * TODO(QUIC): We need to query the short connection id len here,
-             *             e.g. via some API SSL_get_short_conn_id_len()
+             * TODO(QUIC SERVER): We need to query the short connection id len
+             * here, e.g. via some API SSL_get_short_conn_id_len()
              */
             if (ossl_quic_wire_decode_pkt_hdr(&pkt, 0, 0, 1, &hdr, NULL) != 1)
                 return 0;

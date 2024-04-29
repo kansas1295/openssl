@@ -455,7 +455,7 @@ struct ossl_record_method_st {
      * exit the record layer may update this to an alternative fragment size to
      * be used. This must always be less than or equal to |maxfrag|.
      */
-    size_t (*get_max_records)(OSSL_RECORD_LAYER *rl, int type, size_t len,
+    size_t (*get_max_records)(OSSL_RECORD_LAYER *rl, uint8_t type, size_t len,
                               size_t maxfrag, size_t *preffrag);
 
     /*
@@ -503,11 +503,11 @@ struct ossl_record_method_st {
      * which is used in a subsequent call to |release_record|. The buffer must
      * remain available until release_record is called.
      *
-     * Internally the the OSSL_RECORD_METHOD the implementation may read/process
+     * Internally the OSSL_RECORD_METHOD the implementation may read/process
      * multiple records in one go and buffer them.
      */
     int (*read_record)(OSSL_RECORD_LAYER *rl, void **rechandle, int *rversion,
-                      int *type, unsigned char **data, size_t *datalen,
+                      uint8_t *type, unsigned char **data, size_t *datalen,
                       uint16_t *epoch, unsigned char *seq_num);
     /*
      * Release a buffer associated with a record previously read with

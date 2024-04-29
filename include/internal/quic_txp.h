@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -12,6 +12,7 @@
 
 # include <openssl/ssl.h>
 # include "internal/quic_types.h"
+# include "internal/quic_predef.h"
 # include "internal/quic_record_tx.h"
 # include "internal/quic_cfq.h"
 # include "internal/quic_txpim.h"
@@ -20,6 +21,7 @@
 # include "internal/quic_fc.h"
 # include "internal/bio_addr.h"
 # include "internal/time.h"
+# include "internal/qlog.h"
 
 # ifndef OPENSSL_NO_QUIC
 
@@ -48,6 +50,8 @@ typedef struct ossl_quic_tx_packetiser_args_st {
     OSSL_CC_DATA    *cc_data;   /* QUIC Congestion Controller Instance */
     OSSL_TIME       (*now)(void *arg);  /* Callback to get current time. */
     void            *now_arg;
+    QLOG            *(*get_qlog_cb)(void *arg); /* Optional QLOG retrieval func */
+    void            *get_qlog_cb_arg;
 
     /*
      * Injected dependencies - crypto streams.
@@ -56,9 +60,8 @@ typedef struct ossl_quic_tx_packetiser_args_st {
      *       crypto[QUIC_PN_SPACE_APP] is the 1-RTT crypto stream.
      */
     QUIC_SSTREAM    *crypto[QUIC_PN_SPACE_NUM];
-} OSSL_QUIC_TX_PACKETISER_ARGS;
 
-typedef struct ossl_quic_tx_packetiser_st OSSL_QUIC_TX_PACKETISER;
+ } OSSL_QUIC_TX_PACKETISER_ARGS;
 
 OSSL_QUIC_TX_PACKETISER *ossl_quic_tx_packetiser_new(const OSSL_QUIC_TX_PACKETISER_ARGS *args);
 
@@ -68,23 +71,29 @@ typedef void (ossl_quic_initial_token_free_fn)(const unsigned char *buf,
 void ossl_quic_tx_packetiser_free(OSSL_QUIC_TX_PACKETISER *txp);
 
 /*
+ * When in the closing state we need to maintain a count of received bytes
+ * so that we can limit the number of close connection frames we send.
+ * Refer RFC 9000 s. 10.2.1 Closing Connection State.
+ */
+void ossl_quic_tx_packetiser_record_received_closing_bytes(
+        OSSL_QUIC_TX_PACKETISER *txp, size_t n);
+
+/*
  * Generates a datagram by polling the various ELs to determine if they want to
  * generate any frames, and generating a datagram which coalesces packets for
  * any ELs which do.
  *
- * Returns TX_PACKETISER_RES_FAILURE on failure (e.g. allocation error),
- * TX_PACKETISER_RES_NO_PKT if no packets were sent (e.g. because nothing wants
- * to send anything), and TX_PACKETISER_RES_SENT_PKT if packets were sent.
+ * Returns 0 on failure (e.g. allocation error or other errors), 1 otherwise.
  *
- * *status is filled with status information about the generated packet, if any.
+ * *status is filled with status information about the generated packet.
+ * It is always filled even in case of failure. In particular, packets can be
+ * sent even if failure is later returned.
  * See QUIC_TXP_STATUS for details.
  */
-#define TX_PACKETISER_RES_FAILURE   0
-#define TX_PACKETISER_RES_NO_PKT    1
-#define TX_PACKETISER_RES_SENT_PKT  2
-
 typedef struct quic_txp_status_st {
     int sent_ack_eliciting; /* Was an ACK-eliciting packet sent? */
+    int sent_handshake; /* Was a Handshake packet sent? */
+    size_t sent_pkt; /* Number of packets sent (0 if nothing was sent) */
 } QUIC_TXP_STATUS;
 
 int ossl_quic_tx_packetiser_generate(OSSL_QUIC_TX_PACKETISER *txp,
@@ -105,13 +114,15 @@ OSSL_TIME ossl_quic_tx_packetiser_get_deadline(OSSL_QUIC_TX_PACKETISER *txp);
 /*
  * Set the token used in Initial packets. The callback is called when the buffer
  * is no longer needed; for example, when the TXP is freed or when this function
- * is called again with a new buffer.
+ * is called again with a new buffer. Fails returning 0 if the token is too big
+ * to ever be reasonably encapsulated in an outgoing packet based on our current
+ * understanding of our PMTU.
  */
-void ossl_quic_tx_packetiser_set_initial_token(OSSL_QUIC_TX_PACKETISER *txp,
-                                               const unsigned char *token,
-                                               size_t token_len,
-                                               ossl_quic_initial_token_free_fn *free_cb,
-                                               void *free_cb_arg);
+int ossl_quic_tx_packetiser_set_initial_token(OSSL_QUIC_TX_PACKETISER *txp,
+                                              const unsigned char *token,
+                                              size_t token_len,
+                                              ossl_quic_initial_token_free_fn *free_cb,
+                                              void *free_cb_arg);
 
 /* Change the DCID the TXP uses to send outgoing packets. */
 int ossl_quic_tx_packetiser_set_cur_dcid(OSSL_QUIC_TX_PACKETISER *txp,
@@ -121,9 +132,19 @@ int ossl_quic_tx_packetiser_set_cur_dcid(OSSL_QUIC_TX_PACKETISER *txp,
 int ossl_quic_tx_packetiser_set_cur_scid(OSSL_QUIC_TX_PACKETISER *txp,
                                          const QUIC_CONN_ID *scid);
 
-/* Change the destination L4 address the TXP uses to send datagrams. */
+/*
+ * Change the destination L4 address the TXP uses to send datagrams. Specify
+ * NULL (or AF_UNSPEC) to disable use of addressed mode.
+ */
 int ossl_quic_tx_packetiser_set_peer(OSSL_QUIC_TX_PACKETISER *txp,
                                      const BIO_ADDR *peer);
+
+/*
+ * Change the QLOG instance retrieval function in use after instantiation.
+ */
+void ossl_quic_tx_packetiser_set_qlog_cb(OSSL_QUIC_TX_PACKETISER *txp,
+                                         QLOG *(*get_qlog_cb)(void *arg),
+                                         void *get_qlog_cb_arg);
 
 /*
  * Inform the TX packetiser that an EL has been discarded. Idempotent.

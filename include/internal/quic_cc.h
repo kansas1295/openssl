@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -11,10 +11,9 @@
 
 #include "openssl/params.h"
 #include "internal/time.h"
+#include "internal/quic_predef.h"
 
 # ifndef OPENSSL_NO_QUIC
-
-typedef struct ossl_cc_data_st OSSL_CC_DATA;
 
 typedef struct ossl_cc_ack_info_st {
     /* The time the packet being acknowledged was originally sent. */
@@ -80,7 +79,7 @@ typedef struct ossl_cc_ecn_info_st {
  */
 #define OSSL_CC_LOST_FLAG_PERSISTENT_CONGESTION     (1U << 0)
 
-typedef struct ossl_cc_method_st {
+struct ossl_cc_method_st {
     /*
      * Instantiation.
      */
@@ -209,7 +208,7 @@ typedef struct ossl_cc_method_st {
      */
     int (*on_ecn)(OSSL_CC_DATA *ccdata,
                   const OSSL_CC_ECN_INFO *info);
-} OSSL_CC_METHOD;
+};
 
 extern const OSSL_CC_METHOD ossl_cc_dummy_method;
 extern const OSSL_CC_METHOD ossl_cc_newreno_method;

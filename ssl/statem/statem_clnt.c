@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2023 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2024 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
  * Copyright 2005 Nokia. All rights reserved.
  *
@@ -184,7 +184,7 @@ static int ossl_statem_client13_read_transition(SSL_CONNECTION *s, int mt)
             st->hand_state = TLS_ST_CR_SESSION_TICKET;
             return 1;
         }
-        if (mt == SSL3_MT_KEY_UPDATE) {
+        if (mt == SSL3_MT_KEY_UPDATE && !SSL_IS_QUIC_HANDSHAKE(s)) {
             st->hand_state = TLS_ST_CR_KEY_UPDATE;
             return 1;
         }
@@ -871,20 +871,16 @@ WORK_STATE ossl_statem_client_post_work(SSL_CONNECTION *s, WORK_STATE wst)
             return WORK_ERROR;
         }
 
-        if (SSL_CONNECTION_IS_DTLS(s)) {
 #ifndef OPENSSL_NO_SCTP
-            if (s->hit) {
-                /*
-                 * Change to new shared key of SCTP-Auth, will be ignored if
-                 * no SCTP used.
-                 */
-                BIO_ctrl(SSL_get_wbio(ssl), BIO_CTRL_DGRAM_SCTP_NEXT_AUTH_KEY,
-                         0, NULL);
-            }
-#endif
-
-            dtls1_increment_epoch(s, SSL3_CC_WRITE);
+        if (SSL_CONNECTION_IS_DTLS(s) && s->hit) {
+            /*
+            * Change to new shared key of SCTP-Auth, will be ignored if
+            * no SCTP used.
+            */
+            BIO_ctrl(SSL_get_wbio(ssl), BIO_CTRL_DGRAM_SCTP_NEXT_AUTH_KEY,
+                     0, NULL);
         }
+#endif
         break;
 
     case TLS_ST_CW_FINISHED:
@@ -1427,6 +1423,10 @@ static int set_client_ciphersuite(SSL_CONNECTION *s,
         if (SSL_CONNECTION_IS_TLS13(s)) {
             const EVP_MD *md = ssl_md(sctx, c->algorithm2);
 
+            if (!ossl_assert(s->session->cipher != NULL)) {
+                SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+                return 0;
+            }
             /*
              * In TLSv1.3 it is valid for the server to select a different
              * ciphersuite as long as the hash is the same.
@@ -1782,12 +1782,29 @@ MSG_PROCESS_RETURN tls_process_server_hello(SSL_CONNECTION *s, PACKET *pkt)
      * In TLSv1.3 we have some post-processing to change cipher state, otherwise
      * we're done with this message
      */
-    if (SSL_CONNECTION_IS_TLS13(s)
-            && (!ssl->method->ssl3_enc->setup_key_block(s)
+    if (SSL_CONNECTION_IS_TLS13(s)) {
+        if (!ssl->method->ssl3_enc->setup_key_block(s)
                 || !ssl->method->ssl3_enc->change_cipher_state(s,
-                    SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_CLIENT_READ))) {
-        /* SSLfatal() already called */
-        goto err;
+                    SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_CLIENT_READ)) {
+            /* SSLfatal() already called */
+            goto err;
+        }
+        /*
+         * If we're not doing early-data and we're not going to send a dummy CCS
+         * (i.e. no middlebox compat mode) then we can change the write keys
+         * immediately. Otherwise we have to defer this until after all possible
+         * early data is written. We could just always defer until the last
+         * moment except QUIC needs it done at the same time as the read keys
+         * are changed. Since QUIC doesn't do TLS early data or need middlebox
+         * compat this doesn't cause a problem.
+         */
+        if (s->early_data_state == SSL_EARLY_DATA_NONE
+                && (s->options & SSL_OP_ENABLE_MIDDLEBOX_COMPAT) == 0
+                && !ssl->method->ssl3_enc->change_cipher_state(s,
+                    SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_CLIENT_WRITE)) {
+            /* SSLfatal() already called */
+            goto err;
+        }
     }
 
     OPENSSL_free(extensions);
@@ -3356,7 +3373,7 @@ int ossl_gost18_cke_cipher_nid(const SSL_CONNECTION *s)
 
 int ossl_gost_ukm(const SSL_CONNECTION *s, unsigned char *dgst_buf)
 {
-    EVP_MD_CTX * hash = NULL;
+    EVP_MD_CTX *hash = NULL;
     unsigned int md_len;
     SSL_CTX *sctx = SSL_CONNECTION_GET_CTX(s);
     const EVP_MD *md = ssl_evp_md_fetch(sctx->libctx, NID_id_GostR3411_2012_256,
@@ -3772,8 +3789,15 @@ CON_FUNC_RETURN tls_construct_client_certificate(SSL_CONNECTION *s,
         return CON_FUNC_ERROR;
     }
 
+    /*
+     * If we attempted to write early data or we're in middlebox compat mode
+     * then we deferred changing the handshake write keys to the last possible
+     * moment. We need to do it now.
+     */
     if (SSL_CONNECTION_IS_TLS13(s)
             && SSL_IS_FIRST_HANDSHAKE(s)
+            && (s->early_data_state != SSL_EARLY_DATA_NONE
+                || (s->options & SSL_OP_ENABLE_MIDDLEBOX_COMPAT) != 0)
             && (!ssl->method->ssl3_enc->change_cipher_state(s,
                     SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_CLIENT_WRITE))) {
         /*
@@ -3855,7 +3879,14 @@ CON_FUNC_RETURN tls_construct_client_compressed_certificate(SSL_CONNECTION *sc,
             || !WPACKET_close(pkt))
         goto err;
 
+    /*
+     * If we attempted to write early data or we're in middlebox compat mode
+     * then we deferred changing the handshake write keys to the last possible
+     * moment. We need to do it now.
+     */
     if (SSL_IS_FIRST_HANDSHAKE(sc)
+            && (sc->early_data_state != SSL_EARLY_DATA_NONE
+                || (sc->options & SSL_OP_ENABLE_MIDDLEBOX_COMPAT) != 0)
             && (!ssl->method->ssl3_enc->change_cipher_state(sc,
                     SSL3_CC_HANDSHAKE | SSL3_CHANGE_CIPHER_CLIENT_WRITE))) {
         /*
@@ -4033,8 +4064,9 @@ int ssl_cipher_list_to_bytes(SSL_CONNECTION *s, STACK_OF(SSL_CIPHER) *sk,
     int i;
     size_t totlen = 0, len, maxlen, maxverok = 0;
     int empty_reneg_info_scsv = !s->renegotiate
-                                && (SSL_CONNECTION_IS_DTLS(s)
-                                    || s->min_proto_version < TLS1_3_VERSION);
+                                && !SSL_CONNECTION_IS_DTLS(s)
+                                && ssl_security(s, SSL_SECOP_VERSION, 0, TLS1_VERSION, NULL)
+                                && s->min_proto_version <= TLS1_VERSION;
     SSL *ssl = SSL_CONNECTION_GET_SSL(s);
 
     /* Set disabled masks for this session */
@@ -4084,15 +4116,12 @@ int ssl_cipher_list_to_bytes(SSL_CONNECTION *s, STACK_OF(SSL_CIPHER) *sk,
 
         /* Sanity check that the maximum version we offer has ciphers enabled */
         if (!maxverok) {
-            if (SSL_CONNECTION_IS_DTLS(s)) {
-                if (DTLS_VERSION_GE(c->max_dtls, s->s3.tmp.max_ver)
-                        && DTLS_VERSION_LE(c->min_dtls, s->s3.tmp.max_ver))
-                    maxverok = 1;
-            } else {
-                if (c->max_tls >= s->s3.tmp.max_ver
-                        && c->min_tls <= s->s3.tmp.max_ver)
-                    maxverok = 1;
-            }
+            int minproto = SSL_CONNECTION_IS_DTLS(s) ? c->min_dtls : c->min_tls;
+            int maxproto = SSL_CONNECTION_IS_DTLS(s) ? c->max_dtls : c->max_tls;
+
+            if (ssl_version_cmp(s, maxproto, s->s3.tmp.max_ver) >= 0
+                    && ssl_version_cmp(s, minproto, s->s3.tmp.max_ver) <= 0)
+                maxverok = 1;
         }
 
         totlen += len;
@@ -4111,7 +4140,7 @@ int ssl_cipher_list_to_bytes(SSL_CONNECTION *s, STACK_OF(SSL_CIPHER) *sk,
 
     if (totlen != 0) {
         if (empty_reneg_info_scsv) {
-            static SSL_CIPHER scsv = {
+            static const SSL_CIPHER scsv = {
                 0, NULL, NULL, SSL3_CK_SCSV, 0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             if (!ssl->method->put_cipher_by_char(&scsv, pkt, &len)) {
@@ -4120,7 +4149,7 @@ int ssl_cipher_list_to_bytes(SSL_CONNECTION *s, STACK_OF(SSL_CIPHER) *sk,
             }
         }
         if (s->mode & SSL_MODE_SEND_FALLBACK_SCSV) {
-            static SSL_CIPHER scsv = {
+            static const SSL_CIPHER scsv = {
                 0, NULL, NULL, SSL3_CK_FALLBACK_SCSV, 0, 0, 0, 0, 0, 0, 0, 0, 0
             };
             if (!ssl->method->put_cipher_by_char(&scsv, pkt, &len)) {

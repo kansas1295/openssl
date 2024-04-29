@@ -1,5 +1,5 @@
 /*
- * Copyright 2007-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2007-2024 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright Nokia 2007-2019
  * Copyright Siemens AG 2015-2019
  *
@@ -123,6 +123,7 @@ OSSL_CMP_CTX *OSSL_CMP_CTX_new(OSSL_LIB_CTX *libctx, const char *propq)
 
     ctx->keep_alive = 1;
     ctx->msg_timeout = -1;
+    ctx->tls_used = -1; /* default for backward compatibility */
 
     if ((ctx->untrusted = sk_X509_new_null()) == NULL) {
         ERR_raise(ERR_LIB_X509, ERR_R_CRYPTO_LIB);
@@ -182,6 +183,7 @@ int OSSL_CMP_CTX_reinit(OSSL_CMP_CTX *ctx)
         && ossl_cmp_ctx_set1_caPubs(ctx, NULL)
         && ossl_cmp_ctx_set1_extraCertsIn(ctx, NULL)
         && ossl_cmp_ctx_set1_validatedSrvCert(ctx, NULL)
+        && ossl_cmp_ctx_set1_first_senderNonce(ctx, NULL)
         && OSSL_CMP_CTX_set1_transactionID(ctx, NULL)
         && OSSL_CMP_CTX_set1_senderNonce(ctx, NULL)
         && ossl_cmp_ctx_set1_recipNonce(ctx, NULL);
@@ -225,6 +227,7 @@ void OSSL_CMP_CTX_free(OSSL_CMP_CTX *ctx)
     ASN1_OCTET_STRING_free(ctx->transactionID);
     ASN1_OCTET_STRING_free(ctx->senderNonce);
     ASN1_OCTET_STRING_free(ctx->recipNonce);
+    ASN1_OCTET_STRING_free(ctx->first_senderNonce);
     OSSL_CMP_ITAVs_free(ctx->geninfo_ITAVs);
     OSSL_STACK_OF_X509_free(ctx->extraCertsOut);
 
@@ -533,6 +536,8 @@ int OSSL_CMP_CTX_reset_geninfo_ITAVs(OSSL_CMP_CTX *ctx)
     return 1;
 }
 
+DEFINE_OSSL_CMP_CTX_get0(geninfo_ITAVs, STACK_OF(OSSL_CMP_ITAV))
+
 /* Add an itav for the body of outgoing general messages */
 int OSSL_CMP_CTX_push0_genm_ITAV(OSSL_CMP_CTX *ctx, OSSL_CMP_ITAV *itav)
 {
@@ -811,6 +816,9 @@ DEFINE_set1_ASN1_OCTET_STRING(ossl_cmp_ctx, recipNonce)
 /* Stores the given nonce as the last senderNonce sent out */
 DEFINE_set1_ASN1_OCTET_STRING(OSSL_CMP_CTX, senderNonce)
 
+/* store the first req sender nonce for verifying delayed delivery */
+DEFINE_set1_ASN1_OCTET_STRING(ossl_cmp_ctx, first_senderNonce)
+
 /* Set the proxy server to use for HTTP(S) connections */
 DEFINE_OSSL_CMP_CTX_set1(proxy, char)
 
@@ -907,6 +915,9 @@ int OSSL_CMP_CTX_set_option(OSSL_CMP_CTX *ctx, int opt, int val)
     case OSSL_CMP_OPT_UNPROTECTED_ERRORS:
         ctx->unprotectedErrors = val;
         break;
+    case OSSL_CMP_OPT_NO_CACHE_EXTRACERTS:
+        ctx->noCacheExtraCerts = val;
+        break;
     case OSSL_CMP_OPT_VALIDITY_DAYS:
         ctx->days = val;
         break;
@@ -949,6 +960,9 @@ int OSSL_CMP_CTX_set_option(OSSL_CMP_CTX *ctx, int opt, int val)
     case OSSL_CMP_OPT_TOTAL_TIMEOUT:
         ctx->total_timeout = val;
         break;
+    case OSSL_CMP_OPT_USE_TLS:
+        ctx->tls_used = val;
+        break;
     case OSSL_CMP_OPT_PERMIT_TA_IN_EXTRACERTS_FOR_IR:
         ctx->permitTAInExtraCertsForIR = val;
         break;
@@ -989,6 +1003,8 @@ int OSSL_CMP_CTX_get_option(const OSSL_CMP_CTX *ctx, int opt)
         return ctx->unprotectedSend;
     case OSSL_CMP_OPT_UNPROTECTED_ERRORS:
         return ctx->unprotectedErrors;
+    case OSSL_CMP_OPT_NO_CACHE_EXTRACERTS:
+        return ctx->noCacheExtraCerts;
     case OSSL_CMP_OPT_VALIDITY_DAYS:
         return ctx->days;
     case OSSL_CMP_OPT_SUBJECTALTNAME_NODEFAULT:
@@ -1013,6 +1029,8 @@ int OSSL_CMP_CTX_get_option(const OSSL_CMP_CTX *ctx, int opt)
         return ctx->msg_timeout;
     case OSSL_CMP_OPT_TOTAL_TIMEOUT:
         return ctx->total_timeout;
+    case OSSL_CMP_OPT_USE_TLS:
+        return ctx->tls_used;
     case OSSL_CMP_OPT_PERMIT_TA_IN_EXTRACERTS_FOR_IR:
         return ctx->permitTAInExtraCertsForIR;
     case OSSL_CMP_OPT_REVOCATION_REASON:

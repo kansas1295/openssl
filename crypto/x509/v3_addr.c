@@ -1,5 +1,5 @@
 /*
- * Copyright 2006-2021 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2006-2024 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -16,12 +16,13 @@
 #include <assert.h>
 #include <string.h>
 
-#include "internal/cryptlib.h"
 #include <openssl/conf.h>
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
 #include <openssl/buffer.h>
 #include <openssl/x509v3.h>
+#include "internal/cryptlib.h"
+#include "crypto/asn1.h"
 #include "crypto/x509.h"
 #include "ext_dat.h"
 #include "x509_local.h"
@@ -299,6 +300,8 @@ static int IPAddressOrRange_cmp(const IPAddressOrRange *a,
             return -1;
         prefixlen_a = length * 8;
         break;
+    default:
+        return -1;
     }
 
     switch (b->type) {
@@ -312,6 +315,8 @@ static int IPAddressOrRange_cmp(const IPAddressOrRange *a,
             return -1;
         prefixlen_b = length * 8;
         break;
+    default:
+        return -1;
     }
 
     if ((r = memcmp(addr_a, addr_b, length)) != 0)
@@ -402,11 +407,11 @@ static int make_addressPrefix(IPAddressOrRange **result, unsigned char *addr,
                               const int prefixlen, const int afilen)
 {
     int bytelen = (prefixlen + 7) / 8, bitlen = prefixlen % 8;
-    IPAddressOrRange *aor = IPAddressOrRange_new();
+    IPAddressOrRange *aor;
 
     if (prefixlen < 0 || prefixlen > (afilen * 8))
         return 0;
-    if (aor == NULL)
+    if ((aor = IPAddressOrRange_new()) == NULL)
         return 0;
     aor->type = IPAddressOrRange_addressPrefix;
     if (aor->u.addressPrefix == NULL &&
@@ -983,6 +988,10 @@ static void *v2i_IPAddrBlocks(const struct v3_ext_method *method,
          * the other input values.
          */
         if (safi != NULL) {
+            if (val->value == NULL) {
+                ERR_raise(ERR_LIB_X509V3, X509V3_R_MISSING_VALUE);
+                goto err;
+            }
             *safi = strtoul(val->value, &t, 0);
             t += strspn(t, " \t");
             if (*safi > 0xFF || *t++ != ':') {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2017-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -334,7 +334,7 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     }
 
     /* full blocks */
-    if (inl > (unsigned int) cipher_ctx->blocksize) {
+    if (inl > cipher_ctx->blocksize) {
         nblocks = inl/cipher_ctx->blocksize;
         len = nblocks * cipher_ctx->blocksize;
         if (cipher_do_cipher(ctx, out, in, len) < 1)

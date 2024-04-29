@@ -1,5 +1,5 @@
 /*
-* Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
+* Copyright 2022-2024 The OpenSSL Project Authors. All Rights Reserved.
 *
 * Licensed under the Apache License 2.0 (the "License").  You may not use
 * this file except in compliance with the License.  You can obtain a copy
@@ -15,6 +15,8 @@
  * ===============
  */
 DEFINE_LHASH_OF_EX(QUIC_STREAM);
+
+static void shutdown_flush_done(QUIC_STREAM_MAP *qsm, QUIC_STREAM *qs);
 
 /* Circular list management. */
 static void list_insert_tail(QUIC_STREAM_LIST_NODE *l,
@@ -100,7 +102,10 @@ int ossl_quic_stream_map_init(QUIC_STREAM_MAP *qsm,
     qsm->rr_stepping = 1;
     qsm->rr_counter  = 0;
     qsm->rr_cur      = NULL;
-    qsm->num_accept  = 0;
+
+    qsm->num_accept_bidi    = 0;
+    qsm->num_accept_uni     = 0;
+    qsm->num_shutdown_flush = 0;
 
     qsm->get_stream_limit_cb        = get_stream_limit_cb;
     qsm->get_stream_limit_cb_arg    = get_stream_limit_cb_arg;
@@ -265,7 +270,7 @@ static int stream_has_data_to_send(QUIC_STREAM *s)
                                             &num_iov))
         return 0;
 
-    fc_credit = ossl_quic_txfc_get_credit(&s->txfc);
+    fc_credit = ossl_quic_txfc_get_credit(&s->txfc, 0);
     fc_swm    = ossl_quic_txfc_get_swm(&s->txfc);
     fc_limit  = fc_swm + fc_credit;
 
@@ -286,7 +291,7 @@ static ossl_unused int qsm_send_part_permits_gc(const QUIC_STREAM *qs)
 
 static int qsm_ready_for_gc(QUIC_STREAM_MAP *qsm, QUIC_STREAM *qs)
 {
-    int recv_stream_fully_drained = 0; /* TODO(QUIC): Optimisation */
+    int recv_stream_fully_drained = 0; /* TODO(QUIC FUTURE): Optimisation */
 
     /*
      * If sstream has no FIN, we auto-reset it at marked-for-deletion time, so
@@ -307,24 +312,40 @@ static int qsm_ready_for_gc(QUIC_STREAM_MAP *qsm, QUIC_STREAM *qs)
             || qs->send_state == QUIC_SSTREAM_STATE_RESET_RECVD);
 }
 
+int ossl_quic_stream_map_is_local_allowed_by_stream_limit(QUIC_STREAM_MAP *qsm,
+                                                          uint64_t stream_ordinal,
+                                                          int is_uni)
+{
+    uint64_t stream_limit;
+
+    if (qsm->get_stream_limit_cb == NULL)
+        return 1;
+
+    stream_limit = qsm->get_stream_limit_cb(is_uni, qsm->get_stream_limit_cb_arg);
+    return stream_ordinal < stream_limit;
+}
+
 void ossl_quic_stream_map_update_state(QUIC_STREAM_MAP *qsm, QUIC_STREAM *s)
 {
     int should_be_active, allowed_by_stream_limit = 1;
 
-    if (qsm->get_stream_limit_cb != NULL
-        && ossl_quic_stream_is_server_init(s) == qsm->is_server) {
-        int uni = !ossl_quic_stream_is_bidi(s);
-        uint64_t stream_limit, stream_ordinal = s->id >> 2;
+    if (ossl_quic_stream_is_server_init(s) == qsm->is_server) {
+        int is_uni = !ossl_quic_stream_is_bidi(s);
+        uint64_t stream_ordinal = s->id >> 2;
 
-        stream_limit
-            = qsm->get_stream_limit_cb(uni, qsm->get_stream_limit_cb_arg);
-
-        allowed_by_stream_limit = (stream_ordinal < stream_limit);
+        allowed_by_stream_limit
+            = ossl_quic_stream_map_is_local_allowed_by_stream_limit(qsm,
+                                                                    stream_ordinal,
+                                                                    is_uni);
     }
 
     if (s->send_state == QUIC_SSTREAM_STATE_DATA_SENT
         && ossl_quic_sstream_is_totally_acked(s->sstream))
         ossl_quic_stream_map_notify_totally_acked(qsm, s);
+    else if (s->shutdown_flush
+             && s->send_state == QUIC_SSTREAM_STATE_SEND
+             && ossl_quic_sstream_is_totally_acked(s->sstream))
+        shutdown_flush_done(qsm, s);
 
     if (!s->ready_for_gc) {
         s->ready_for_gc = qsm_ready_for_gc(qsm, s);
@@ -396,6 +417,16 @@ int ossl_quic_stream_map_notify_all_data_sent(QUIC_STREAM_MAP *qsm,
     }
 }
 
+static void shutdown_flush_done(QUIC_STREAM_MAP *qsm, QUIC_STREAM *qs)
+{
+    if (!qs->shutdown_flush)
+        return;
+
+    assert(qsm->num_shutdown_flush > 0);
+    qs->shutdown_flush = 0;
+    --qsm->num_shutdown_flush;
+}
+
 int ossl_quic_stream_map_notify_totally_acked(QUIC_STREAM_MAP *qsm,
                                               QUIC_STREAM *qs)
 {
@@ -411,6 +442,8 @@ int ossl_quic_stream_map_notify_totally_acked(QUIC_STREAM_MAP *qsm,
         /* We no longer need a QUIC_SSTREAM in this state. */
         ossl_quic_sstream_free(qs->sstream);
         qs->sstream = NULL;
+
+        shutdown_flush_done(qsm, qs);
         return 1;
     }
 }
@@ -462,6 +495,7 @@ int ossl_quic_stream_map_reset_stream_send_part(QUIC_STREAM_MAP *qsm,
         ossl_quic_sstream_free(qs->sstream);
         qs->sstream = NULL;
 
+        shutdown_flush_done(qsm, qs);
         ossl_quic_stream_map_update_state(qsm, qs);
         return 1;
 
@@ -704,7 +738,10 @@ void ossl_quic_stream_map_push_accept_queue(QUIC_STREAM_MAP *qsm,
                                             QUIC_STREAM *s)
 {
     list_insert_tail(&qsm->accept_list, &s->accept_node);
-    ++qsm->num_accept;
+    if (ossl_quic_stream_is_bidi(s))
+        ++qsm->num_accept_bidi;
+    else
+        ++qsm->num_accept_uni;
 }
 
 static QUIC_RXFC *qsm_get_max_streams_rxfc(QUIC_STREAM_MAP *qsm, QUIC_STREAM *s)
@@ -721,15 +758,24 @@ void ossl_quic_stream_map_remove_from_accept_queue(QUIC_STREAM_MAP *qsm,
     QUIC_RXFC *max_streams_rxfc;
 
     list_remove(&qsm->accept_list, &s->accept_node);
-    --qsm->num_accept;
+    if (ossl_quic_stream_is_bidi(s))
+        --qsm->num_accept_bidi;
+    else
+        --qsm->num_accept_uni;
 
     if ((max_streams_rxfc = qsm_get_max_streams_rxfc(qsm, s)) != NULL)
         ossl_quic_rxfc_on_retire(max_streams_rxfc, 1, rtt);
 }
 
-size_t ossl_quic_stream_map_get_accept_queue_len(QUIC_STREAM_MAP *qsm)
+size_t ossl_quic_stream_map_get_accept_queue_len(QUIC_STREAM_MAP *qsm, int is_uni)
 {
-    return qsm->num_accept;
+    return is_uni ? qsm->num_accept_uni : qsm->num_accept_bidi;
+}
+
+size_t ossl_quic_stream_map_get_total_accept_queue_len(QUIC_STREAM_MAP *qsm)
+{
+    return ossl_quic_stream_map_get_accept_queue_len(qsm, /*is_uni=*/0)
+        + ossl_quic_stream_map_get_accept_queue_len(qsm, /*is_uni=*/1);
 }
 
 void ossl_quic_stream_map_gc(QUIC_STREAM_MAP *qsm)
@@ -744,6 +790,48 @@ void ossl_quic_stream_map_gc(QUIC_STREAM_MAP *qsm)
 
          ossl_quic_stream_map_release(qsm, qs);
     }
+}
+
+static int eligible_for_shutdown_flush(QUIC_STREAM *qs)
+{
+    /*
+     * We only care about servicing the send part of a stream (if any) during
+     * shutdown flush. We make sure we flush a stream if it is either
+     * non-terminated or was terminated normally such as via
+     * SSL_stream_conclude. A stream which was terminated via a reset is not
+     * flushed, and we will have thrown away the send buffer in that case
+     * anyway.
+     */
+    switch (qs->send_state) {
+    case QUIC_SSTREAM_STATE_SEND:
+    case QUIC_SSTREAM_STATE_DATA_SENT:
+        return !ossl_quic_sstream_is_totally_acked(qs->sstream);
+    default:
+        return 0;
+    }
+}
+
+static void begin_shutdown_flush_each(QUIC_STREAM *qs, void *arg)
+{
+    QUIC_STREAM_MAP *qsm = arg;
+
+    if (!eligible_for_shutdown_flush(qs) || qs->shutdown_flush)
+        return;
+
+    qs->shutdown_flush = 1;
+    ++qsm->num_shutdown_flush;
+}
+
+void ossl_quic_stream_map_begin_shutdown_flush(QUIC_STREAM_MAP *qsm)
+{
+    qsm->num_shutdown_flush = 0;
+
+    ossl_quic_stream_map_visit(qsm, begin_shutdown_flush_each, qsm);
+}
+
+int ossl_quic_stream_map_is_shutdown_flush_finished(QUIC_STREAM_MAP *qsm)
+{
+    return qsm->num_shutdown_flush == 0;
 }
 
 /*
