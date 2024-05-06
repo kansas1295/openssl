@@ -47,11 +47,24 @@ OpenSSL 3.4
 
    *Tim Perry*
 
+ * Added support for requesting CRL in CMP.
+
+   This work was sponsored by Siemens AG.
+
+    *Rajeev Ranjan*
+
  * Added Attribute Certificate (RFC 5755) support. Attribute
    Certificates can be created, parsed, modified and printed via the
    public API. There is no command-line tool support at this time.
 
    *Damian Hobson-Garcia*
+
+ * Added support to build Position Independent Executables (PIE). Configuration
+   option `enable-pie` configures the cflag '-fPIE' and ldflag '-pie' to
+   support Address Space Layout Randomization (ASLR) in the openssl executable,
+   removes reliance on external toolchain configurations.
+
+   *Craig Lorentzen*
 
 OpenSSL 3.3
 -----------
