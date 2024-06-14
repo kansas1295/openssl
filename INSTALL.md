@@ -52,6 +52,8 @@ To install OpenSSL, you will need:
  * Perl 5 with core modules (please read [NOTES-PERL.md](NOTES-PERL.md))
  * The Perl module `Text::Template` (please read [NOTES-PERL.md](NOTES-PERL.md))
  * an ANSI C compiler
+ * POSIX C library (at least POSIX.1-2008), or compatible types and
+   functionality.
  * a development environment in the form of development libraries and C
    header files
  * a supported operating system
@@ -65,6 +67,7 @@ issues and other details, please read one of these:
  * [Notes for the DOS platform with DJGPP](NOTES-DJGPP.md)
  * [Notes for the OpenVMS platform](NOTES-VMS.md)
  * [Notes for the HPE NonStop platform](NOTES-NONSTOP.md)
+ * [Notes on POSIX](NOTES-POSIX.md)
  * [Notes on Perl](NOTES-PERL.md)
  * [Notes on Valgrind](NOTES-VALGRIND.md)
 
@@ -506,11 +509,6 @@ This source is ignored by the FIPS provider.
 
 Use the `RDSEED` or `RDRAND` command on x86 or `RNDRRS` command on aarch64
 if provided by the CPU.
-
-### librandom
-
-Use librandom (not implemented yet).
-This source is ignored by the FIPS provider.
 
 ### none
 
@@ -1116,6 +1114,10 @@ Similarly `no-dtls` will disable `dtls1` and `dtls1_2`.  The `no-ssl` option is
 synonymous with `no-ssl3`.  Note this only affects version negotiation.
 OpenSSL will still provide the methods for applications to explicitly select
 the individual protocol versions.
+
+### no-integrity-only-ciphers
+
+Don't build support for integrity only ciphers in tls.
 
 ### no-{protocol}-method
 

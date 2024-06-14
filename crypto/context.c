@@ -11,6 +11,7 @@
 #include <openssl/conf.h>
 #include "internal/thread_once.h"
 #include "internal/property.h"
+#include "internal/cryptlib.h"
 #include "internal/core.h"
 #include "internal/bio.h"
 #include "internal/provider.h"
@@ -48,8 +49,10 @@ struct ossl_lib_ctx_st {
     void *thread_event_handler;
     void *fips_prov;
 #endif
+    STACK_OF(SSL_COMP) *comp_methods;
 
-    unsigned int ischild:1;
+    int ischild;
+    int conf_diagnostics;
 };
 
 int ossl_lib_ctx_write_lock(OSSL_LIB_CTX *ctx)
@@ -203,6 +206,10 @@ static int context_init(OSSL_LIB_CTX *ctx)
     if (!ossl_property_parse_init(ctx))
         goto err;
 
+#ifndef FIPS_MODULE
+    ctx->comp_methods = ossl_load_builtin_compressions();
+#endif
+
     return 1;
 
  err:
@@ -343,6 +350,14 @@ static void context_deinit_objs(OSSL_LIB_CTX *ctx)
         ctx->child_provider = NULL;
     }
 #endif
+
+#ifndef FIPS_MODULE
+    if (ctx->comp_methods != NULL) {
+        ossl_free_compression_methods_int(ctx->comp_methods);
+        ctx->comp_methods = NULL;
+    }
+#endif
+
 }
 
 static int context_deinit(OSSL_LIB_CTX *ctx)
@@ -633,9 +648,17 @@ void *ossl_lib_ctx_get_data(OSSL_LIB_CTX *ctx, int index)
         return ctx->fips_prov;
 #endif
 
+    case OSSL_LIB_CTX_COMP_METHODS:
+        return (void *)&ctx->comp_methods;
+
     default:
         return NULL;
     }
+}
+
+void *OSSL_LIB_CTX_get_data(OSSL_LIB_CTX *ctx, int index)
+{
+    return ossl_lib_ctx_get_data(ctx, index);
 }
 
 OSSL_EX_DATA_GLOBAL *ossl_lib_ctx_get_ex_data_global(OSSL_LIB_CTX *ctx)
@@ -665,4 +688,20 @@ CRYPTO_THREAD_LOCAL *ossl_lib_ctx_get_rcukey(OSSL_LIB_CTX *libctx)
     if (libctx == NULL)
         return NULL;
     return &libctx->rcu_local_key;
+}
+
+int OSSL_LIB_CTX_get_conf_diagnostics(OSSL_LIB_CTX *libctx)
+{
+    libctx = ossl_lib_ctx_get_concrete(libctx);
+    if (libctx == NULL)
+        return 0;
+    return libctx->conf_diagnostics;
+}
+
+void OSSL_LIB_CTX_set_conf_diagnostics(OSSL_LIB_CTX *libctx, int value)
+{
+    libctx = ossl_lib_ctx_get_concrete(libctx);
+    if (libctx == NULL)
+        return;
+    libctx->conf_diagnostics = value;
 }

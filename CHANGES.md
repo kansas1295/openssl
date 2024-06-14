@@ -39,13 +39,36 @@ OpenSSL 3.4
  * The X25519 and X448 key exchange implementation in the FIPS provider
    is unapproved and has `fips=no` property.
 
-   * Tomas Mraz*
+   *Tomáš Mráz*
+
+ * SHAKE-128 and SHAKE-256 implementations have no default digest length
+   anymore. That means these algorithms cannot be used with
+   EVP_DigestFinal/_ex() unless the `xoflen` param is set before.
+
+   This change was necessary because the preexisting default lengths were
+   half the size necessary for full collision resistance supported by these
+   algorithms.
+
+   *Tomáš Mráz*
+
+ * Setting `config_diagnostics=1` in the config file will cause errors to
+   be returned from SSL_CTX_new() and SSL_CTX_new_ex() if there is an error
+   in the ssl module configuration.
+
+   *Tomáš Mráz*
 
  * Use an empty renegotiate extension in TLS client hellos instead of
    the empty renegotiation SCSV, for all connections with a minimum TLS
    version > 1.0.
 
    *Tim Perry*
+
+ * Added support for integrity-only cipher suites TLS_SHA256_SHA256 and
+   TLS_SHA384_SHA384 in TLS 1.3, as defined in RFC 9150.
+
+   This work was sponsored by Siemens AG.
+
+   *Rajeev Ranjan*
 
  * Added support for requesting CRL in CMP.
 
@@ -66,10 +89,63 @@ OpenSSL 3.4
 
    *Craig Lorentzen*
 
+ * SSL_SESSION_get_time()/SSL_SESSION_set_time()/SSL_CTX_flush_sessions() have
+   been deprecated in favour of their respective ..._ex() replacement functions
+   which are Y2038-safe.
+
+   *Alexander Kanavin*
+
+ * ECC groups may now customize their initialization to save CPU by using
+   precomputed values. This is used by the P-256 implementation.
+
+   *Watson Ladd*
+
 OpenSSL 3.3
 -----------
 
-### Changes between 3.2 and 3.3 [xx XXX xxxx]
+### Changes between 3.3.0 and 3.3.1 [xx XXX xxxx]
+
+ * Fixed potential use after free after SSL_free_buffers() is called.
+
+   The SSL_free_buffers function is used to free the internal OpenSSL
+   buffer used when processing an incoming record from the network.
+   The call is only expected to succeed if the buffer is not currently
+   in use. However, two scenarios have been identified where the buffer
+   is freed even when still in use.
+
+   The first scenario occurs where a record header has been received
+   from the network and processed by OpenSSL, but the full record body
+   has not yet arrived. In this case calling SSL_free_buffers will succeed
+   even though a record has only been partially processed and the buffer
+   is still in use.
+
+   The second scenario occurs where a full record containing application
+   data has been received and processed by OpenSSL but the application has
+   only read part of this data. Again a call to SSL_free_buffers will
+   succeed even though the buffer is still in use.
+
+   ([CVE-2024-4741])
+
+   *Matt Caswell*
+
+ * Fixed an issue where checking excessively long DSA keys or parameters may
+   be very slow.
+
+   Applications that use the functions EVP_PKEY_param_check() or
+   EVP_PKEY_public_check() to check a DSA public key or DSA parameters may
+   experience long delays. Where the key or parameters that are being checked
+   have been obtained from an untrusted source this may lead to a Denial of
+   Service.
+
+   To resolve this issue DSA keys larger than OPENSSL_DSA_MAX_MODULUS_BITS
+   will now fail the check immediately with a DSA_R_MODULUS_TOO_LARGE error
+   reason.
+
+   ([CVE-2024-4603])
+
+   *Tomáš Mráz*
+
+### Changes between 3.2 and 3.3.0 [9 Apr 2024]
 
  * The `-verify` option to the `openssl crl` and `openssl req` will make
    the program exit with 1 on failure.
@@ -20654,6 +20730,8 @@ ndif
 
 <!-- Links -->
 
+[CVE-2024-4741]: https://www.openssl.org/news/vulnerabilities.html#CVE-2024-4741
+[CVE-2024-4603]: https://www.openssl.org/news/vulnerabilities.html#CVE-2024-4603
 [CVE-2024-2511]: https://www.openssl.org/news/vulnerabilities.html#CVE-2024-2511
 [CVE-2024-0727]: https://www.openssl.org/news/vulnerabilities.html#CVE-2024-0727
 [CVE-2023-6237]: https://www.openssl.org/news/vulnerabilities.html#CVE-2023-6237

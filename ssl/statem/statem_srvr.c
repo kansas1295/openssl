@@ -27,6 +27,7 @@
 #include <openssl/core_names.h>
 #include <openssl/asn1t.h>
 #include <openssl/comp.h>
+#include "internal/comp.h"
 
 #define TICKET_NONCE_SIZE       8
 
@@ -3230,7 +3231,7 @@ static int tls_process_cke_gost(SSL_CONNECTION *s, PACKET *pkt)
     }
     if (EVP_PKEY_decrypt_init(pkey_ctx) <= 0) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
-        return 0;
+        goto err;
     }
     /*
      * If client certificate is present and is of the same type, maybe

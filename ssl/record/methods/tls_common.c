@@ -283,6 +283,8 @@ static int tls_release_read_buffer(OSSL_RECORD_LAYER *rl)
         OPENSSL_cleanse(b->buf, b->len);
     OPENSSL_free(b->buf);
     b->buf = NULL;
+    rl->packet = NULL;
+    rl->packet_length = 0;
     return 1;
 }
 
@@ -323,6 +325,12 @@ int tls_default_read_n(OSSL_RECORD_LAYER *rl, size_t n, size_t max, int extend,
         rl->packet = rb->buf + rb->offset;
         rl->packet_length = 0;
         /* ... now we can act as if 'extend' was set */
+    }
+
+    if (!ossl_assert(rl->packet != NULL)) {
+        /* does not happen */
+        RLAYERfatal(rl, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return OSSL_RECORD_RETURN_FATAL;
     }
 
     len = rl->packet_length;
@@ -1434,11 +1442,13 @@ static void tls_int_free(OSSL_RECORD_LAYER *rl)
     tls_release_write_buffer(rl);
 
     EVP_CIPHER_CTX_free(rl->enc_ctx);
+    EVP_MAC_CTX_free(rl->mac_ctx);
     EVP_MD_CTX_free(rl->md_ctx);
 #ifndef OPENSSL_NO_COMP
     COMP_CTX_free(rl->compctx);
 #endif
-
+    OPENSSL_free(rl->iv);
+    OPENSSL_free(rl->nonce);
     if (rl->version == SSL3_VERSION)
         OPENSSL_cleanse(rl->mac_secret, sizeof(rl->mac_secret));
 
@@ -2127,7 +2137,10 @@ int tls_free_buffers(OSSL_RECORD_LAYER *rl)
     /* Read direction */
 
     /* If we have pending data to be read then fail */
-    if (rl->curr_rec < rl->num_recs || TLS_BUFFER_get_left(&rl->rbuf) != 0)
+    if (rl->curr_rec < rl->num_recs
+            || rl->curr_rec != rl->num_released
+            || TLS_BUFFER_get_left(&rl->rbuf) != 0
+            || rl->rstate == SSL_ST_READ_BODY)
         return 0;
 
     return tls_release_read_buffer(rl);

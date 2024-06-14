@@ -21,6 +21,9 @@
 #elif defined(__s390__) || defined(__s390x__)
 # include "s390x_arch.h"
 # define CPU_INFO_STR_LEN 2048
+#elif defined(__riscv)
+# include "crypto/riscv_arch.h"
+# define CPU_INFO_STR_LEN 2048
 #else
 # define CPU_INFO_STR_LEN 128
 #endif
@@ -98,6 +101,33 @@ DEFINE_RUN_ONCE_STATIC(init_info_strings)
         BIO_snprintf(ossl_cpu_info_str + strlen(ossl_cpu_info_str),
                      sizeof(ossl_cpu_info_str) - strlen(ossl_cpu_info_str),
                      " env:%s", env);
+# elif defined(__riscv)
+    const char *env;
+    char sep = '=';
+
+    BIO_snprintf(ossl_cpu_info_str, sizeof(ossl_cpu_info_str),
+                 CPUINFO_PREFIX "OPENSSL_riscvcap");
+    for (size_t i = 0; i < kRISCVNumCaps; ++i) {
+        if (OPENSSL_riscvcap_P[RISCV_capabilities[i].index]
+                & (1 << RISCV_capabilities[i].bit_offset)) {
+            /* Match, display the name */
+            BIO_snprintf(ossl_cpu_info_str + strlen(ossl_cpu_info_str),
+                         sizeof(ossl_cpu_info_str) - strlen(ossl_cpu_info_str),
+                         "%c%s", sep, RISCV_capabilities[i].name);
+            /* Only the first sep is '=' */
+            sep = '_';
+        }
+    }
+    /* If no capability is found, add back the = */
+    if (sep == '=') {
+        BIO_snprintf(ossl_cpu_info_str + strlen(ossl_cpu_info_str),
+                     sizeof(ossl_cpu_info_str) - strlen(ossl_cpu_info_str),
+                     "%c", sep);
+    }
+    if ((env = getenv("OPENSSL_riscvcap")) != NULL)
+        BIO_snprintf(ossl_cpu_info_str + strlen(ossl_cpu_info_str),
+                     sizeof(ossl_cpu_info_str) - strlen(ossl_cpu_info_str),
+                     " env:%s", env);
 # endif
 #endif
 
@@ -140,9 +170,6 @@ DEFINE_RUN_ONCE_STATIC(init_info_strings)
 # else
         add_seeds_string("rdrand ( rdseed rdrand )");
 # endif
-#endif
-#ifdef OPENSSL_RAND_SEED_LIBRANDOM
-        add_seeds_string("C-library-random");
 #endif
 #ifdef OPENSSL_RAND_SEED_GETRANDOM
         add_seeds_string("getrandom-syscall");

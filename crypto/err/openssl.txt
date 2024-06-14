@@ -1400,6 +1400,7 @@ SSL_R_EMPTY_RAW_PUBLIC_KEY:349:empty raw public key
 SSL_R_EMPTY_SRTP_PROTECTION_PROFILE_LIST:354:empty srtp protection profile list
 SSL_R_ENCRYPTED_LENGTH_TOO_LONG:150:encrypted length too long
 SSL_R_ERROR_IN_RECEIVED_CIPHER_LIST:151:error in received cipher list
+SSL_R_ERROR_IN_SYSTEM_DEFAULT_CONFIG:419:error in system default config
 SSL_R_ERROR_SETTING_TLSA_BASE_DOMAIN:204:error setting tlsa base domain
 SSL_R_EXCEEDS_MAX_FRAGMENT_SIZE:194:exceeds max fragment size
 SSL_R_EXCESSIVE_MESSAGE_SIZE:152:excessive message size
@@ -1600,10 +1601,13 @@ SSL_R_TLSV1_ALERT_EXPORT_RESTRICTION:1060:tlsv1 alert export restriction
 SSL_R_TLSV1_ALERT_INAPPROPRIATE_FALLBACK:1086:tlsv1 alert inappropriate fallback
 SSL_R_TLSV1_ALERT_INSUFFICIENT_SECURITY:1071:tlsv1 alert insufficient security
 SSL_R_TLSV1_ALERT_INTERNAL_ERROR:1080:tlsv1 alert internal error
+SSL_R_TLSV1_ALERT_NO_APPLICATION_PROTOCOL:1120:\
+	tlsv1 alert no application protocol
 SSL_R_TLSV1_ALERT_NO_RENEGOTIATION:1100:tlsv1 alert no renegotiation
 SSL_R_TLSV1_ALERT_PROTOCOL_VERSION:1070:tlsv1 alert protocol version
 SSL_R_TLSV1_ALERT_RECORD_OVERFLOW:1022:tlsv1 alert record overflow
 SSL_R_TLSV1_ALERT_UNKNOWN_CA:1048:tlsv1 alert unknown ca
+SSL_R_TLSV1_ALERT_UNKNOWN_PSK_IDENTITY:1115:tlsv1 alert unknown psk identity
 SSL_R_TLSV1_ALERT_USER_CANCELLED:1090:tlsv1 alert user cancelled
 SSL_R_TLSV1_BAD_CERTIFICATE_HASH_VALUE:1114:tlsv1 bad certificate hash value
 SSL_R_TLSV1_BAD_CERTIFICATE_STATUS_RESPONSE:1113:\
